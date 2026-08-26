@@ -12,7 +12,6 @@ import { ErrorBoundary } from '@/components/error-boundary'
 import { authClient, completeElectronAuthCallback, isElectronAuthCallbackActive } from './auth'
 import { installNativeTabBehavior } from './native-tab-behavior'
 import { createRendererErrorReporting, type RendererFatalScope } from './renderer-error-reporting'
-import { isMarkdownFixtureHash, MarkdownFixturePanel } from './markdown-fixture-panel'
 
 // Desktop windows should not Tab-cycle a focus ring through the whole UI like a web page.
 installNativeTabBehavior()
@@ -141,7 +140,7 @@ try {
       <RendererCommitSentinel />
       <ErrorBoundary name="AppRoot" variant="page" showErrorDetails>
         <Provider store={jotaiStore}>
-          {isMarkdownFixtureHash() ? <MarkdownFixturePanel /> : <RouterProvider router={router} />}
+          <RouterProvider router={router} />
         </Provider>
       </ErrorBoundary>
     </>
