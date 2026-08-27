@@ -115,17 +115,41 @@ const escapeXml = (value: string): string =>
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
 
-const renderMermaidLoadFallback = (source: string): { svg: string } => {
-  const lines = source.split('\n').slice(0, 12);
-  const truncated = source.split('\n').length > lines.length;
-  const text = lines.map((line) => escapeXml(line)).join('\n');
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="480" height="${
-    24 + lines.length * 16 + (truncated ? 16 : 0)
-  }" viewBox="0 0 480 ${24 + lines.length * 16 + (truncated ? 16 : 0)}">
-  <rect width="100%" height="100%" fill="#fef3c7" rx="6" />
-  <text x="12" y="18" font-family="ui-monospace,monospace" font-size="11" fill="#92400e">Diagram unavailable in this browser</text>
-  <text x="12" y="40" font-family="ui-monospace,monospace" font-size="11" fill="#78350f"><tspan>${text}</tspan>${
-    truncated ? '<tspan x="12" dy="16">…</tspan>' : ''
+const FALLBACK_MAX_LINES = 12;
+const FALLBACK_MAX_LINE_LENGTH = 88;
+const FALLBACK_FONT_SIZE = 12;
+const FALLBACK_LINE_HEIGHT = 18;
+const FALLBACK_PADDING = 12;
+// Monospace advance width is ~0.6em; close enough for sizing a source listing.
+const FALLBACK_CHAR_WIDTH = FALLBACK_FONT_SIZE * 0.6;
+
+// When the runtime cannot load (old browser) or the source uses a diagram type
+// beautiful-mermaid does not support, show the mermaid source as a plain code
+// block instead of an error panel: the source is the most useful thing left to
+// display, and staying SVG keeps Streamdown's copy/download controls working.
+const renderMermaidLoadFallback = (source: string, options: RenderOptions): { svg: string } => {
+  const allLines = source.split('\n');
+  const lines = allLines
+    .slice(0, FALLBACK_MAX_LINES)
+    .map((line) =>
+      line.length > FALLBACK_MAX_LINE_LENGTH ? `${line.slice(0, FALLBACK_MAX_LINE_LENGTH)}…` : line
+    );
+  const truncated = allLines.length > FALLBACK_MAX_LINES;
+  const longest = Math.max(1, ...lines.map((line) => line.length));
+  const width = Math.ceil(FALLBACK_PADDING * 2 + longest * FALLBACK_CHAR_WIDTH);
+  const height = FALLBACK_PADDING * 2 + (lines.length + (truncated ? 1 : 0)) * FALLBACK_LINE_HEIGHT;
+  const tspans = lines
+    .map(
+      (line, index) =>
+        `<tspan x="${FALLBACK_PADDING}" dy="${index === 0 ? 0 : FALLBACK_LINE_HEIGHT}">${
+          escapeXml(line) || ' '
+        }</tspan>`
+    )
+    .join('');
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+<rect width="100%" height="100%" fill="${options.surface ?? options.bg ?? '#f8fafc'}" rx="6" />
+<text x="${FALLBACK_PADDING}" y="${FALLBACK_PADDING + FALLBACK_FONT_SIZE}" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="${FALLBACK_FONT_SIZE}" fill="${options.fg ?? '#0f172a'}">${tspans}${
+    truncated ? `<tspan x="${FALLBACK_PADDING}" dy="${FALLBACK_LINE_HEIGHT}">…</tspan>` : ''
   }</text>
 </svg>`;
   return { svg };
@@ -164,20 +188,18 @@ export const createMarkdownMermaidPlugin = (): DiagramPlugin => {
           currentConfig = { ...MERMAID_BASE_CONFIG, ...nextConfig };
         },
         render: async (_id: string, source: string) => {
+          const fallbackOptions = mermaidConfigToRenderOptions(currentConfig);
           const runtime = await loadRuntime();
           if (!runtime) {
-            return renderMermaidLoadFallback(source);
+            return renderMermaidLoadFallback(source, fallbackOptions);
           }
           try {
             return {
-              svg: await runtime.renderMermaidSVGAsync(
-                source,
-                mermaidConfigToRenderOptions(currentConfig)
-              ),
+              svg: await runtime.renderMermaidSVGAsync(source, fallbackOptions),
             };
           } catch (error) {
             console.warn('[Lody] Mermaid render failed; using fallback.', error);
-            return renderMermaidLoadFallback(source);
+            return renderMermaidLoadFallback(source, fallbackOptions);
           }
         },
       };
