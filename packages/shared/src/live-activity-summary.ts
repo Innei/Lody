@@ -126,8 +126,18 @@ function resolveStatus(
   return lastReadAt === null || lastMessageAt > lastReadAt ? 'unread' : null;
 }
 
-function resolveUpdatedAt(session: SessionMeta): number {
-  return parseTimestamp(session.lastMessageAt) ?? parseTimestamp(session.createdAt) ?? 0;
+function resolveUpdatedAt(
+  session: SessionMeta,
+  status: LiveActivityConversationStatus
+): number {
+  const lastMessageAt = parseTimestamp(session.lastMessageAt);
+  if (status !== 'unread') {
+    // lastMessageAt is stamped when a turn completes, so while a turn is active it
+    // points at the previous turn. lastRunningSeen is this turn's start.
+    const turnStart = parseTimestamp(session.lastRunningSeen);
+    if (turnStart !== null && turnStart >= (lastMessageAt ?? 0)) return turnStart;
+  }
+  return lastMessageAt ?? parseTimestamp(session.createdAt) ?? 0;
 }
 
 /** Two-letter logo abbreviation per brand; keep exhaustive over AgentBrandId. */
@@ -205,7 +215,7 @@ export function buildLiveActivityConversationItems({
     .map((session) => {
       const status = resolveStatus(session, liveSessionStatuses);
       if (!status) return null;
-      const updatedAt = resolveUpdatedAt(session);
+      const updatedAt = resolveUpdatedAt(session, status);
       const agentConfig = session.agentConfigId
         ? agentConfigsById.get(session.agentConfigId)
         : undefined;
@@ -303,7 +313,7 @@ export function findLiveActivityPermissionAlertCandidate({
       }
     }
 
-    const updatedAt = resolveUpdatedAt(session);
+    const updatedAt = resolveUpdatedAt(session, 'permission');
     const key = `${session.id}:${updatedAt}`;
     const sessionTitle = truncateText(normalizeText(session.title) || defaultTitle, 96);
     if (!candidate || updatedAt > candidate.updatedAt) {
