@@ -5,10 +5,20 @@ export type SessionModelHistorySource = {
   latestModel: () => SessionMeta['lastModel'];
 };
 
+type AssistantLike = {
+  role?: string;
+  modelInfo?: unknown;
+  items?: readonly unknown[];
+  plan?: readonly unknown[];
+};
+
+// The renderer hides assistant entries with no items and no plan (interrupted or
+// failed turns leave them behind); the summary must not advance on them either.
 function projectAssistantModel(
-  entry: { role?: string; modelInfo?: unknown } | undefined
+  entry: AssistantLike | undefined
 ): SessionMeta['lastModel'] | undefined {
   if (entry?.role !== 'assistant') return;
+  if (!entry.items?.length && !entry.plan?.length) return;
   const value = entry.modelInfo;
   const model = (
     value && typeof value === 'object' && !Array.isArray(value) ? value : {}
@@ -18,9 +28,7 @@ function projectAssistantModel(
   return { ...(modelId ? { modelId } : {}), ...(name ? { name } : {}) };
 }
 
-export function latestSessionModel(
-  history: readonly { role: string; modelInfo?: unknown }[]
-): SessionMeta['lastModel'] {
+export function latestSessionModel(history: readonly AssistantLike[]): SessionMeta['lastModel'] {
   for (let index = history.length - 1; index >= 0; index--) {
     const model = projectAssistantModel(history[index]);
     if (model !== undefined) return model;
@@ -30,7 +38,7 @@ export function latestSessionModel(
 
 export function latestSessionModelFromReader(history: {
   count(): number;
-  readAt(position: number): { state: string; turn?: { role: string; modelInfo?: unknown } };
+  readAt(position: number): { state: string; turn?: AssistantLike };
 }): SessionMeta['lastModel'] {
   for (let index = history.count() - 1; index >= 0; index--) {
     const read = history.readAt(index);

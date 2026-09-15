@@ -16,6 +16,8 @@ optional `SessionMeta.lastModel`, retaining only `modelId` and `name`. The field
 does not include provider extension metadata, launch settings or requested input
 configuration. Later changes to an older assistant entry cannot replace the
 latest entry's model. Rewinding history recomputes the summary from retained history.
+An assistant entry with no items and no plan is not a response; the summary skips
+it, matching the transcript renderer, which hides such entries.
 
 An absent summary means this producer has not supplied it. `null` means the
 observed history has no assistant entry. An empty object means an assistant
@@ -26,7 +28,9 @@ Projection follows documents already open for normal work; it must not enumerate
 and open historical rooms. Streaming unchanged model data does not rewrite the
 catalog. Publication is serialized and does not block the prompt path; a failure
 is retried on the next document change or flush. Existing persistence and Streams
-transport own delivery. Hidden fork targets and deleted sessions are not published.
+transport own delivery. Hidden fork targets and deleted sessions are not published;
+once a fork commit makes the target visible, its summary is published without
+waiting for another history change.
 
 ## Limits and evidence
 

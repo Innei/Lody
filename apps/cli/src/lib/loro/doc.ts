@@ -87,10 +87,7 @@ import {
   attachAutoMarkLatestUserHistoryAsRead,
   type AutoMarkLatestUserHistoryAsReadHandle,
 } from './history-auto-read';
-import {
-  attachSessionModelSummary,
-  latestSessionModelFromReader,
-} from './session-model-summary';
+import { attachSessionModelSummary, latestSessionModelFromReader } from './session-model-summary';
 
 import {
   LoroConnectionRecoveryController,
@@ -1899,6 +1896,11 @@ export class SessionDocument implements LoroDocument<Omit<SessionDocMeta, 'histo
         )
     );
     if (this.sessionData.history.count() > 0) void this.modelSummary.sync();
+  }
+
+  /** Re-run the projection once a catalog row the publisher previously skipped exists. */
+  async syncModelSummary(): Promise<void> {
+    await this.modelSummary?.flush();
   }
 
   /**

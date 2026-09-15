@@ -14,12 +14,13 @@ import { attachSessionModelSummary, latestSessionModel } from './session-model-s
 
 const assistant = (
   id: string,
-  modelInfo?: SessionHistoryInput['modelInfo']
+  modelInfo?: SessionHistoryInput['modelInfo'],
+  items: SessionHistoryInput['items'] = [{ type: 'text', text: 'hi' }]
 ): SessionHistoryInput => ({
   id,
   role: 'assistant',
   timestamp: '2026-09-12T00:00:00Z',
-  items: [],
+  items,
   modelInfo,
 });
 
@@ -70,6 +71,46 @@ describe('session model summary', () => {
     ).toEqual({ modelId: 'actual', name: 'Actual' });
     expect(latestSessionModel([first, assistant('a2')])).toEqual({});
     expect(latestSessionModel([])).toBeNull();
+  });
+
+  it('ignores assistant entries the renderer hides: no items and no plan', () => {
+    const shown = assistant('a1', { modelId: 'shown', name: 'Shown' });
+    const empty = assistant('a2', { modelId: 'empty', name: 'Empty' }, []);
+    expect(latestSessionModel([shown, empty])).toEqual({ modelId: 'shown', name: 'Shown' });
+    expect(latestSessionModel([empty])).toBeNull();
+    expect(
+      latestSessionModel([
+        shown,
+        { ...empty, plan: [{ content: 'step', status: 'pending', priority: 'medium' }] },
+      ])
+    ).toEqual({ modelId: 'empty', name: 'Empty' });
+  });
+
+  it('publishes a fork target once its catalog row becomes visible', async () => {
+    let stored: { meta: Partial<SessionMeta> } | undefined;
+    const raw = new LoroDoc();
+    const repo = {
+      openPersistedDoc: async () => ({ doc: raw }),
+      getDocMeta: async () => stored,
+      upsertDocMeta: async (_id: string, patch: Partial<SessionMeta>) => {
+        stored = { meta: { ...stored?.meta, ...patch } };
+      },
+    } as unknown as LoroRepo;
+    const logger = { debug() {}, info() {}, warn() {}, error() {} } as unknown as Logger;
+    const doc = new SessionDocument(repo, 'fork-target' as SessionId, async () => {}, logger);
+    await doc.initOffline();
+    await doc.sessionData.commands.appendTurn(
+      assistant('a1', { modelId: 'forked', name: 'Forked' }) as SessionTurn
+    );
+    await doc.syncModelSummary();
+    expect(stored).toBeUndefined();
+    await repo.upsertDocMeta('fork-target', { id: 'fork-target' } as SessionMeta);
+    await doc.syncModelSummary();
+    expect(stored?.meta).toEqual({
+      id: 'fork-target',
+      lastModel: { modelId: 'forked', name: 'Forked' },
+    });
+    await doc.destroy({ preserveStatus: true });
   });
 
   it('projects real history writes, coalesces streaming, handles rewind and stops on disposal', async () => {
