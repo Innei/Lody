@@ -1,3 +1,5 @@
+import { useEmptySessionDraft } from '@/hooks/use-empty-session-draft';
+import { sessionHasUnreadMessages } from '@/lib/session-read-receipt';
 import {
   Archive,
   ArchiveRestore,
@@ -10,9 +12,9 @@ import {
   GitBranch,
   GitFork,
   Github,
+  Image,
   Link,
   LockKeyhole,
-  Loader2,
   Monitor,
   PanelBottom,
   PanelLeft,
@@ -22,6 +24,7 @@ import {
   Trash2,
   Users,
 } from 'lucide-react';
+import { Spinner } from '@/ui/spinner';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/ui/button';
 import { useRouter } from '@tanstack/react-router';
@@ -35,6 +38,7 @@ import {
   getSessionPullRequestLegacyFields,
   getSessionRoomId,
   getAcpCapabilityCacheEntryAuthority,
+  isLoroRepoDocDeleted,
   resolveProjectGitHubRepo,
   SessionForkOperationSchema,
   type CommentReferencePayload,
@@ -90,7 +94,7 @@ import {
   terminalDockOpenAtom,
 } from '@/components/terminal/terminal-controller';
 import { isElectronRenderer, isMacOSElectronRenderer, useElectronFullscreen } from '@/lib/electron';
-import { useWindowsCaptionPadClass } from '@/ui/window-drag-region';
+import { useMacTrafficLightRowPadClass, useWindowsCaptionPadClass } from '@/ui/window-drag-region';
 import {
   getZenAwarePanelToggleState,
   navigationSidebarHiddenAtom,
@@ -147,11 +151,11 @@ import {
   type ConversationTabEntry,
   type ViewerTabEntry,
 } from '@/components/mobile/mobile-session-tab-sheet';
-import {
-  MobileSessionMenuSheet,
-  type MobileSessionMenuAction,
-  type MobileSessionMenuInfoRow,
+import type {
+  MobileSessionMenuAction,
+  MobileSessionMenuInfoRow,
 } from '@/components/mobile/mobile-session-menu-sheet';
+import { SessionShareMobileMenu } from '@/components/sharing/session-share-mobile-menu';
 import { MobileFileViewerDrawer } from '@/components/mobile/mobile-file-viewer-drawer';
 import { GlassIconButton } from '@/components/mobile/glass-icon-button';
 import { toast } from 'sonner';
@@ -232,6 +236,9 @@ import {
   resolveSessionWorkspacePath,
 } from '@/lib/session-workspace-path';
 import {
+  EMPTY_SESSION_TAB_ID,
+  getSessionTabFallback,
+  isSessionTabClosed,
   formatExplicitSessionTabSearch,
   formatSessionTabSearch,
   parseSessionTabSearch,
@@ -240,6 +247,8 @@ import {
 } from '@/lib/session-tab-url';
 import {
   getSessionNavigationLocation,
+  resolveCurrentWorkspaceTabNavigation,
+  resolveSessionTabRestoreNavigation,
   type SessionNavigationTarget,
 } from '@/lib/session-navigation';
 import { getSessionDetailInitialTabState } from '@/lib/session-detail-initial-state';
@@ -258,6 +267,7 @@ import {
 } from '@/lib/session-file-provider-open-result';
 import { canOpenHistoricalSessionDiffs } from '@/lib/session-file-provider';
 import { useSessionDoc, useSessionDocSyncState } from '@/hooks/use-session-doc';
+import { useConversationTail } from '@/hooks/use-conversation-view';
 import { useDelayedFlag } from '@/hooks/use-delayed-flag';
 import { isSyncingRoomSyncState } from '@/lib/room-sync-state';
 import {
@@ -468,10 +478,30 @@ const PR_SIDEBAR_MIN_WIDTH_PX = 500;
 
 const selectSessionDetailMeta = (meta: SessionMeta | undefined): SessionMeta | undefined => meta;
 
+/**
+ * Serialized meta, memoized on the object.
+ *
+ * This equality gate runs on every session-meta emission, and the retained
+ * previous value was re-serialized each time even though only the incoming
+ * one is new.
+ */
+const sessionDetailMetaFingerprints = new WeakMap<SessionMeta, string>();
+const sessionDetailMetaFingerprint = (meta: SessionMeta): string => {
+  const cached = sessionDetailMetaFingerprints.get(meta);
+  if (cached !== undefined) return cached;
+  const computed = JSON.stringify(meta);
+  sessionDetailMetaFingerprints.set(meta, computed);
+  return computed;
+};
+
 const sessionDetailMetaEqual = (
   left: SessionMeta | undefined,
   right: SessionMeta | undefined
-): boolean => left === right || JSON.stringify(left) === JSON.stringify(right);
+): boolean =>
+  left === right ||
+  (left !== undefined &&
+    right !== undefined &&
+    sessionDetailMetaFingerprint(left) === sessionDetailMetaFingerprint(right));
 
 function PendingWorktreeForkObserver({
   targetSessionId,
@@ -482,7 +512,10 @@ function PendingWorktreeForkObserver({
   onCompleted: () => void;
   onFailed: (message: string) => void;
 }) {
-  const { doc, ready } = useSessionDoc(targetSessionId, { syncEnabled: true });
+  const { doc, history, ready } = useSessionDoc(targetSessionId, { syncEnabled: true });
+  // The fork service appends the origin notice as the LAST entry of the cloned
+  // history, so the always-hydrated tail is where it shows up.
+  const { turns: tail } = useConversationTail(history);
   const terminalRef = useRef(false);
   useEffect(() => {
     if (!ready || terminalRef.current) return;
@@ -492,7 +525,7 @@ function PendingWorktreeForkObserver({
       onFailed(operation.data.error?.message ?? 'Unable to create the fork worktree');
       return;
     }
-    const completed = doc.history.some((entry) =>
+    const completed = tail.some((entry) =>
       (entry.items ?? []).some(
         (item) => item.type === 'system_notice' && item.name === 'session_fork_origin'
       )
@@ -501,7 +534,7 @@ function PendingWorktreeForkObserver({
       terminalRef.current = true;
       onCompleted();
     }
-  }, [doc.forkOperation, doc.history, onCompleted, onFailed, ready]);
+  }, [doc.forkOperation, tail, onCompleted, onFailed, ready]);
   return null;
 }
 
@@ -713,6 +746,10 @@ const SessionDetail = ({
   const { openSettings } = useOpenSettings();
   const isElectronFullscreen = useElectronFullscreen();
   const windowsCaptionPadClass = useWindowsCaptionPadClass();
+  const macTrafficLightRowPadClass = useMacTrafficLightRowPadClass();
+  const macTrafficLightBorderedRowPadClass = useMacTrafficLightRowPadClass({
+    bottomBorder: true,
+  });
   // Publish ephemeral "viewing this session" presence (drives the owning
   // machine's PR poller priority); actively cleared on switch/hide/unmount.
   usePublishSessionViewing(sessionId);
@@ -936,6 +973,19 @@ const SessionDetail = ({
     [sessionId]
   );
   const archivedChildSessions = useAtomValue(archivedChildSessionsAtom);
+  const closedConversations = useMemo(
+    () =>
+      [
+        ...(activeSession ? [activeSession] : []),
+        ...childSessions,
+        ...archivedChildSessions,
+      ].filter(isSessionTabClosed),
+    [activeSession, childSessions, archivedChildSessions]
+  );
+  const closedConversationIds = useMemo(
+    () => new Set<string>(closedConversations.map((s) => s.id)),
+    [closedConversations]
+  );
   const [draftTabs, setDraftTabsState] = useState<DraftSessionTab[]>(() =>
     readPersistedDraftTabs(sessionId)
   );
@@ -965,6 +1015,14 @@ const SessionDetail = ({
     () => new Set()
   );
   const [tabOrder, setTabOrderState] = useState<string[]>(() => readStoredTabOrder(sessionId));
+  const tabRestoreNavigationRequestIdRef = useRef(0);
+  const [pendingTabRestoreNavigation, setPendingTabRestoreNavigation] = useState<{
+    requestId: number;
+    tabSessionId: SessionId;
+    sourceSessionId: SessionId;
+    sourceUrlTab: string | undefined;
+    writeCompleted: boolean;
+  } | null>(null);
   const detailLoadStartMsRef = useRef(getPerformanceNowMs());
   const fireDetailNotFoundOnce = useFireOncePerKey<SessionId>();
 
@@ -1065,10 +1123,11 @@ const SessionDetail = ({
       return changed ? next : prev;
     });
   }, [viewerTabs]);
-  const orderedSessionTabIds = useMemo(() => {
+  const allOrderedSessionTabIds = useMemo(() => {
     const orderedIds: string[] = [sessionId];
     const knownTabIds = new Set<string>([
       ...visibleChildSessions.map((childSession) => childSession.id),
+      ...archivedChildSessions.map((childSession) => childSession.id),
       ...draftTabs.map((draft) => draft.id),
     ]);
     const seen = new Set<string>(orderedIds);
@@ -1081,7 +1140,7 @@ const SessionDetail = ({
       seen.add(tabId);
     }
 
-    for (const childSession of visibleChildSessions) {
+    for (const childSession of [...visibleChildSessions, ...archivedChildSessions]) {
       if (!seen.has(childSession.id)) {
         orderedIds.push(childSession.id);
         seen.add(childSession.id);
@@ -1094,7 +1153,15 @@ const SessionDetail = ({
     }
 
     return orderedIds;
-  }, [draftTabs, sessionId, sessionTabOrder, visibleChildSessions]);
+  }, [draftTabs, sessionId, sessionTabOrder, visibleChildSessions, archivedChildSessions]);
+  const orderedSessionTabIds = useMemo(
+    () => allOrderedSessionTabIds.filter((id) => !closedConversationIds.has(id)),
+    [allOrderedSessionTabIds, closedConversationIds]
+  );
+  const allOrderedSessionTabIdSet = useMemo(
+    () => new Set(allOrderedSessionTabIds),
+    [allOrderedSessionTabIds]
+  );
 
   const handleSessionTabReorder = useCallback(
     (orderedTabIds: string[]) => {
@@ -1122,31 +1189,31 @@ const SessionDetail = ({
   // taken at its word, so a named child whose meta has not reached the local
   // replica yet stays active (a pending surface renders below) instead of
   // bouncing the user back to the parent conversation.
-  const activeTabSessionId = useMemo(
+  const requestedTabSessionId = useMemo(
     () =>
       resolveActiveSessionTab(parsedUrlTab, {
         parentSessionId: sessionId,
         // Side chats never own a top tab, so a URL addressing one (an
         // opened-by link to a side-chat session) renders the parent.
-        childSessionIdsResolvedToParent: [
-          ...archivedChildSessions.map((s) => s.id),
-          ...sideSessions.map((s) => s.id),
-        ],
+        childSessionIdsResolvedToParent: [...sideSessions.map((s) => s.id)],
         draftTabIds: draftTabs.map((draft) => draft.id),
         promotedChildSessionIdsByDraftId: pendingDraftChildSessionIds,
       }),
-    [
-      parsedUrlTab,
-      archivedChildSessions,
-      draftTabs,
-      pendingDraftChildSessionIds,
-      sessionId,
-      sideSessions,
-    ]
+    [parsedUrlTab, draftTabs, pendingDraftChildSessionIds, sessionId, sideSessions]
   );
+  const activeTabSessionId = closedConversationIds.has(requestedTabSessionId)
+    ? getSessionTabFallback(
+        requestedTabSessionId,
+        allOrderedSessionTabIds,
+        orderedSessionTabIds,
+        docMetaCacheReady
+      )
+    : requestedTabSessionId;
+  const isEmptyConversation = activeTabSessionId === EMPTY_SESSION_TAB_ID;
   // A URL-named child the meta replica has not delivered yet: keep it active
   // and render a pending surface instead of silently showing the parent.
   const activeTabIsPendingChild =
+    !isEmptyConversation &&
     activeTabSessionId !== sessionId &&
     !isDraftSessionTabId(activeTabSessionId) &&
     !visibleChildSessions.some((s) => s.id === activeTabSessionId);
@@ -1159,6 +1226,7 @@ const SessionDetail = ({
   }, [activeTabSessionId, sessionId, visibleChildSessions]);
   // The session meta for the currently active tab (may be parent or a child)
   const activeTabSession = useMemo(() => {
+    if (activeTabSessionId === EMPTY_SESSION_TAB_ID) return null;
     if (activeTabSessionId === sessionId) return activeSession;
     return visibleChildSessions.find((s) => s.id === activeTabSessionId) ?? activeSession;
   }, [activeTabSessionId, sessionId, activeSession, visibleChildSessions]);
@@ -1432,7 +1500,7 @@ const SessionDetail = ({
       fileDiffsByTurn,
     },
   } = useSessionDiffSummary(activeSessionTabId ?? sessionId, {
-    enabled: activeSessionTabId !== null,
+    enabled: activeSessionTabId !== null || isEmptyConversation,
     fileProvider: activeSessionFileProvider,
     fileProviderPending: activeSessionFileProviderPending,
   });
@@ -1445,10 +1513,11 @@ const SessionDetail = ({
   // use the same durable session-meta snapshot instead of independently
   // totaling provider entries that can resolve at different times.
   const changesDiffStat = activeSession?.diffStats?.allChange ?? null;
-  const activeBrowserSession = activeDraftTab ? null : activeTabSession;
-  const workspaceOwnerSession = activeTabSession?.parentSessionId
-    ? activeSession
-    : activeTabSession;
+  // Closing the conversation does not close workspace tools. Keep their owner
+  // explicit without making the parent an active conversation again.
+  const activeBrowserSession = activeDraftTab ? null : (activeTabSession ?? activeSession);
+  const workspaceOwnerSession =
+    activeTabSession?.parentSessionId || isEmptyConversation ? activeSession : activeTabSession;
   const activeSessionProject = activeSession?.project;
   const activeSessionProjectKind = activeSessionProject?.kind ?? null;
   const activeSessionProjectRepoFullName =
@@ -1681,6 +1750,25 @@ const SessionDetail = ({
     [writeSessionUrlTab]
   );
 
+  // A confirmed shared close invalidates this URL choice. Replace only that
+  // exact choice, never a newer navigation, and never infer closure from a
+  // missing replica row. This is not URL/local-selection mirroring. The close
+  // itself is the feedback: no toast, whether this or another client closed it.
+  useEffect(() => {
+    if (!docMetaCacheReady) return;
+    if (!closedConversationIds.has(requestedTabSessionId)) return;
+    if (router.state.location.search.tab !== urlTab) return;
+    navigateToSessionTab(activeTabSessionId);
+  }, [
+    docMetaCacheReady,
+    closedConversationIds,
+    requestedTabSessionId,
+    activeTabSessionId,
+    urlTab,
+    router,
+    navigateToSessionTab,
+  ]);
+
   const replaceSessionUrlPr = useCallback(
     (nextPrNumber: number | undefined, { push = false }: { push?: boolean } = {}) => {
       if (!workspaceSlug) {
@@ -1746,7 +1834,8 @@ const SessionDetail = ({
     touchSessionActivity,
     updateSessionTitle,
     archiveSession,
-    restoreSession,
+    setSessionTabClosed,
+    reopenSessionTab,
     deleteSessions,
     deleteArchivedSession,
     setSessionPinned,
@@ -1898,25 +1987,33 @@ const SessionDetail = ({
   const handleTogglePreviewAnnotationInChat = useCallback(
     (targetSessionId: SessionId, reference: VisualAnnotationReferencePayload) => {
       const chatRef = chatRefsMap.current.get(targetSessionId);
-      if (chatRef && 'toggleVisualAnnotationReference' in chatRef) {
+      if (
+        !closedConversationIds.has(targetSessionId) &&
+        chatRef &&
+        'toggleVisualAnnotationReference' in chatRef
+      ) {
         return chatRef.toggleVisualAnnotationReference(reference);
       }
       toast.error(t('sessions.preview.annotation.chatUnavailable', 'Open the session chat first'));
       return false;
     },
-    [t]
+    [closedConversationIds, t]
   );
 
   const handleAddPreviewAnnotationToChat = useCallback(
     (targetSessionId: SessionId, reference: VisualAnnotationReferencePayload) => {
       const chatRef = chatRefsMap.current.get(targetSessionId);
-      if (chatRef && 'addVisualAnnotationReference' in chatRef) {
+      if (
+        !closedConversationIds.has(targetSessionId) &&
+        chatRef &&
+        'addVisualAnnotationReference' in chatRef
+      ) {
         return chatRef.addVisualAnnotationReference(reference);
       }
       toast.error(t('sessions.preview.annotation.chatUnavailable', 'Open the session chat first'));
       return false;
     },
-    [t]
+    [closedConversationIds, t]
   );
 
   const handleNewTab = useCallback(() => {
@@ -1956,19 +2053,47 @@ const SessionDetail = ({
     [setDraftTabs]
   );
 
+  useEmptySessionDraft({
+    enabled: docMetaCacheReady && isEmptyConversation,
+    parent: activeSession,
+    drafts: draftTabs,
+    onCreate: (draft) => {
+      setDraftTabs((prev) => (prev.some((tab) => tab.id === draft.id) ? prev : [...prev, draft]));
+      setTabOrderState((prev) => appendTabOrderId(prev, sessionGroupIds, draft.id));
+    },
+    onSelect: (draftId) => {
+      if (router.state.location.search.tab !== urlTab) return;
+      // Replace the empty sentinel without deactivating a mobile tool viewer.
+      navigateToSessionTab(draftId);
+    },
+  });
+
   const closeDraftTab = useCallback(
     (draftId: DraftSessionTab['id']) => {
       setDraftTabs((prev) => prev.filter((draft) => draft.id !== draftId));
       setTabOrderState((prev) => removeTabOrderId(prev, draftId));
       if (activeTabSessionId === draftId) {
-        // Explicit parent, replacing the dead draft URL in place.
-        navigateToSessionTab(sessionId);
+        // Replace the dead draft URL with an open neighbour or empty surface.
+        navigateToSessionTab(
+          getSessionTabFallback(
+            draftId,
+            allOrderedSessionTabIds,
+            orderedSessionTabIds.filter((id) => id !== draftId)
+          )
+        );
       }
       captureSessionDetailEvent('session/tab_draft_closed', {
         draft_tab_id: draftId,
       });
     },
-    [activeTabSessionId, captureSessionDetailEvent, navigateToSessionTab, sessionId, setDraftTabs]
+    [
+      activeTabSessionId,
+      captureSessionDetailEvent,
+      navigateToSessionTab,
+      allOrderedSessionTabIds,
+      orderedSessionTabIds,
+      setDraftTabs,
+    ]
   );
 
   const handleSendDraft = useCallback(
@@ -2232,25 +2357,46 @@ const SessionDetail = ({
         tab_session_id: tabSessionId,
         is_active_tab: tabSessionId === activeTabSessionId,
       });
-      // If the tab has never had a message, just delete it instead of archiving
-      const tabMeta = childSessions.find((s) => s.id === tabSessionId);
       try {
+        // A tab that never had a message is exact-deleted instead of marked
+        // closed — isTabClosed would leave an invisible durable doc. Judge
+        // emptiness from getDocMeta directly: the meta scan cache can still
+        // be cold here, and exact deletion must bypass discovery.
+        const tabEntry = runtime
+          ? await runtime.repo.getDocMeta(getSessionRoomId(tabSessionId))
+          : undefined;
+        if (isLoroRepoDocDeleted(tabEntry)) throw new Error('Session was deleted');
+        const tabMeta = tabEntry?.meta as SessionMeta | undefined;
         if (tabMeta && !tabMeta.lastMessageAt) {
           await deleteSessions([tabSessionId]);
           captureSessionDetailEvent('session/tab_deleted_empty', {
             tab_session_id: tabSessionId,
           });
+          // A deleted tab leaves no isTabClosed meta for the shared-close
+          // effect to react to, and resolveActiveSessionTab keeps a
+          // meta-missing tab active, so the handler must leave the dead URL
+          // itself: a child close returns to the route's session tab.
+          if (tabSessionId === activeTabSessionId) {
+            navigateToSessionTab(sessionId);
+          }
         } else {
-          await archiveSession(tabSessionId);
-          captureSessionDetailEvent('session/tab_archived', {
-            tab_session_id: tabSessionId,
-          });
-        }
-        // Switch to the parent tab only once the close is durable; a failed
-        // close keeps the tab selected instead of yanking the user off it.
-        // Explicit parent, replacing the closed tab's URL in place.
-        if (tabSessionId === activeTabSessionId) {
-          navigateToSessionTab(sessionId);
+          await setSessionTabClosed(tabSessionId, true);
+          // The shared-close effect chooses the neighbour once hydration
+          // finishes. Do not commit a fallback from this handler's partial
+          // metadata snapshot.
+          if (
+            docMetaCacheReady &&
+            tabSessionId === activeTabSessionId &&
+            router.state.location.search.tab === urlTab
+          ) {
+            navigateToSessionTab(
+              getSessionTabFallback(
+                tabSessionId,
+                allOrderedSessionTabIds,
+                orderedSessionTabIds.filter((id) => id !== tabSessionId)
+              )
+            );
+          }
         }
       } catch (error) {
         // A silent failure reads as "the close button does nothing" — surface
@@ -2266,29 +2412,71 @@ const SessionDetail = ({
     },
     [
       activeTabSessionId,
-      archiveSession,
-      captureSessionDetailEvent,
-      childSessions,
-      closeDraftTab,
       deleteSessions,
+      setSessionTabClosed,
+      docMetaCacheReady,
+      captureSessionDetailEvent,
+      closeDraftTab,
       navigateToSessionTab,
+      allOrderedSessionTabIds,
+      orderedSessionTabIds,
+      router,
+      runtime,
       sessionId,
+      urlTab,
       t,
     ]
   );
 
   const handleTabRestore = useCallback(
     async (tabSessionId: SessionId) => {
+      const requestId = ++tabRestoreNavigationRequestIdRef.current;
+      setPendingTabRestoreNavigation({
+        requestId,
+        tabSessionId,
+        sourceSessionId: sessionId,
+        sourceUrlTab: router.state.location.search.tab,
+        writeCompleted: false,
+      });
       captureSessionDetailEvent('session/tab_restore_requested', {
         tab_session_id: tabSessionId,
       });
-      await restoreSession(tabSessionId);
-      captureSessionDetailEvent('session/tab_restored', {
-        tab_session_id: tabSessionId,
-      });
+      try {
+        await reopenSessionTab(tabSessionId);
+        setPendingTabRestoreNavigation((current) =>
+          current?.requestId === requestId ? { ...current, writeCompleted: true } : current
+        );
+      } catch (error) {
+        setPendingTabRestoreNavigation((current) =>
+          current?.requestId === requestId ? null : current
+        );
+        console.error('Failed to reopen session tab', error);
+        toast.error(t('sessions.tabReopenFailed', 'Could not reopen this tab'));
+      }
     },
-    [captureSessionDetailEvent, restoreSession]
+    [captureSessionDetailEvent, reopenSessionTab, router, sessionId, t]
   );
+
+  useEffect(() => {
+    if (!pendingTabRestoreNavigation) return;
+    const resolution = resolveSessionTabRestoreNavigation(
+      pendingTabRestoreNavigation.tabSessionId,
+      pendingTabRestoreNavigation.sourceSessionId,
+      sessionId,
+      pendingTabRestoreNavigation.sourceUrlTab,
+      urlTab,
+      pendingTabRestoreNavigation.writeCompleted,
+      closedConversationIds
+    );
+    if (resolution.kind === 'wait') return;
+
+    setPendingTabRestoreNavigation((current) =>
+      current?.requestId === pendingTabRestoreNavigation.requestId ? null : current
+    );
+    if (resolution.kind === 'navigate') {
+      navigateToSessionTab(resolution.tabSessionId, { push: true });
+    }
+  }, [closedConversationIds, navigateToSessionTab, pendingTabRestoreNavigation, sessionId, urlTab]);
 
   // Navigate back to session list.
   const handleBackToList = useCallback(() => {
@@ -2329,14 +2517,13 @@ const SessionDetail = ({
 
   // Archive the active tab (mobile more menu) — archives child if child is active, parent otherwise
   const handleArchiveActiveTab = useCallback(async () => {
-    if (!activeSession) return;
+    if (!activeSession || isEmptyConversation) return;
     if (activeDraftTab) {
       closeDraftTab(activeDraftTab.id);
       return;
     }
     if (activeTabSessionId && activeTabSessionId !== sessionId) {
-      // Archiving a child tab — delegate to tab close logic
-      await handleTabClose(activeTabSessionId);
+      await archiveSession(activeTabSessionId as SessionId);
     } else {
       // Archiving the parent
       await archiveSession(activeSession.id);
@@ -2349,15 +2536,15 @@ const SessionDetail = ({
     archiveSession,
     closeDraftTab,
     handleBackToList,
-    handleTabClose,
+    isEmptyConversation,
     sessionId,
   ]);
 
   // Restore the current archived session from the header menu
   const handleRestoreCurrentSession = useCallback(async () => {
     if (!activeSession) return;
-    await restoreSession(activeSession.id);
-  }, [activeSession, restoreSession]);
+    await handleTabRestore(activeSession.id);
+  }, [activeSession, handleTabRestore]);
 
   // Confirmation state for permanently deleting the current archived session
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
@@ -2534,14 +2721,14 @@ const SessionDetail = ({
     void activeChatRef.copyConversationHistory();
   }, [activeDraftTab, activeTabSessionId, captureSessionDetailEvent, t]);
 
-  const handleShareAsImage = useCallback(() => {
+  const handleShareAsImage = useCallback(async () => {
     if (activeDraftTab) {
       return;
     }
     const activeChatRef = chatRefsMap.current.get(activeTabSessionId);
     const shareData =
       activeChatRef && 'getShareImageData' in activeChatRef
-        ? activeChatRef.getShareImageData()
+        ? await activeChatRef.getShareImageData()
         : null;
     if (
       !activeTabSession ||
@@ -2561,6 +2748,28 @@ const SessionDetail = ({
       });
     });
   }, [activeDraftTab, activeTabSession, activeTabSessionId, t]);
+
+  // The share is finished, so the whole flow ends: the preview closes and the
+  // chat drops the selection behind it. Resolve the surface by the session the
+  // card was built from rather than whatever tab is active now — the export is
+  // async and the user may have moved on while the save dialog was up.
+  const handleShareImageCompleted = useCallback(
+    (action: 'copied' | 'saved') => {
+      const targetSessionId = shareImageTarget?.session.id;
+      setShareImageTarget(null);
+      if (targetSessionId) {
+        const chatRef = chatRefsMap.current.get(targetSessionId);
+        if (chatRef && 'cancelShareImageSelection' in chatRef) chatRef.cancelShareImageSelection();
+      }
+      // A save announced itself through the native dialog or the browser's
+      // download UI. A copy did not, and the preview that used to say so has
+      // just closed, so this is the last place it can be said.
+      if (action === 'copied') {
+        toast.success(t('sessions.shareImage.copied', 'Image copied to clipboard'));
+      }
+    },
+    [shareImageTarget, t]
+  );
 
   const handleOpenSearch = useCallback(() => {
     if (activeDraftTab) {
@@ -3205,12 +3414,10 @@ const SessionDetail = ({
         const resolution = await resolveSessionFileProviderOpenPath(
           activeSessionFileProvider,
           target.filePath
-        ).catch(
-          (): SessionFileProviderOpenPathResolution => ({
-            path: target.filePath,
-            redirected: false,
-          })
-        );
+        ).catch((): SessionFileProviderOpenPathResolution => ({
+          path: target.filePath,
+          redirected: false,
+        }));
         const resolvedFilePath = resolution.path;
 
         const requestSeq = nextFocusRequestSeq();
@@ -3287,12 +3494,10 @@ const SessionDetail = ({
           const resolution = await resolveSessionFileProviderOpenPath(
             activeSessionFileProvider,
             tab.filePath
-          ).catch(
-            (): SessionFileProviderOpenPathResolution => ({
-              path: tab.filePath,
-              redirected: false,
-            })
-          );
+          ).catch((): SessionFileProviderOpenPathResolution => ({
+            path: tab.filePath,
+            redirected: false,
+          }));
           if (!resolution.redirected || resolution.path === tab.filePath) {
             return { tab, next: tab };
           }
@@ -3439,12 +3644,22 @@ const SessionDetail = ({
   );
   const handleNavigateSession = useCallback(
     (target: SessionNavigationTarget) => {
-      const location = getSessionNavigationLocation(target);
-      if (location.sessionId === sessionId) {
-        handleSessionTabSelect(target.tabSessionId ?? target.sessionId);
+      const currentTabNavigation = resolveCurrentWorkspaceTabNavigation(
+        target,
+        sessionId,
+        allOrderedSessionTabIdSet,
+        closedConversationIds
+      );
+      if (currentTabNavigation) {
+        if (currentTabNavigation.shouldReopen) {
+          void handleTabRestore(currentTabNavigation.tabSessionId);
+        } else {
+          handleSessionTabSelect(currentTabNavigation.tabSessionId);
+        }
         return;
       }
 
+      const location = getSessionNavigationLocation(target);
       if (!workspaceSlug) return;
       void router.navigate({
         to: '/$workspaceName/sessions/$sessionId',
@@ -3452,7 +3667,15 @@ const SessionDetail = ({
         search: { tab: location.tab },
       });
     },
-    [handleSessionTabSelect, router, sessionId, workspaceSlug]
+    [
+      allOrderedSessionTabIdSet,
+      closedConversationIds,
+      handleSessionTabSelect,
+      handleTabRestore,
+      router,
+      sessionId,
+      workspaceSlug,
+    ]
   );
 
   // When a viewer tab is selected, activate the viewer surface for the current session.
@@ -3603,22 +3826,18 @@ const SessionDetail = ({
     });
     return [
       ...fixedTabs,
-      ...visibleSideSessions.map(
-        (sideSession): SessionSidePanelTabItem => ({
-          id: getSideSessionPanelTabId(sideSession.id),
-          label: sideSession.title?.trim() || t('sessions.detailTabs.sideSession', 'Side Chat'),
-          kind: 'session',
-          closeable: true,
-          pending: closingSideSessionIds.has(sideSession.id),
-        })
-      ),
-      ...viewerTabItems.map(
-        (tab): SessionSidePanelTabItem => ({
-          ...tab,
-          kind: tab.type,
-          closeable: true,
-        })
-      ),
+      ...visibleSideSessions.map((sideSession): SessionSidePanelTabItem => ({
+        id: getSideSessionPanelTabId(sideSession.id),
+        label: sideSession.title?.trim() || t('sessions.detailTabs.sideSession', 'Side Chat'),
+        kind: 'session',
+        closeable: true,
+        pending: closingSideSessionIds.has(sideSession.id),
+      })),
+      ...viewerTabItems.map((tab): SessionSidePanelTabItem => ({
+        ...tab,
+        kind: tab.type,
+        closeable: true,
+      })),
     ];
   }, [
     closingSideSessionIds,
@@ -3892,7 +4111,8 @@ const SessionDetail = ({
     title: t('commands.session.archiveCurrent', 'Archive Current Chat'),
     category: 'Session',
     keybindings: getCommandKeybindings('session.archiveCurrent'),
-    when: () => Boolean(activeSession) && activeSession?.isArchived !== true,
+    when: () =>
+      Boolean(activeTabSession) && !isEmptyConversation && activeSession?.isArchived !== true,
     run: () => {
       setArchiveConfirmOpen(true);
     },
@@ -4039,9 +4259,10 @@ const SessionDetail = ({
        never resolve. Panel and viewer changes made while it loads are still
        the user's, so the write happens regardless — the conversation slot
        just keeps its previously stored value until the child resolves. */
-    const persistedSessionTabId = activeTabIsPendingChild
-      ? (readStoredLastActiveTabState(sessionId)?.sessionTabId ?? sessionId)
-      : activeTabSessionId;
+    const persistedSessionTabId =
+      !docMetaCacheReady || activeTabIsPendingChild
+        ? (readStoredLastActiveTabState(sessionId)?.sessionTabId ?? sessionId)
+        : activeTabSessionId;
     writeStoredLastActiveTabState(sessionId, {
       sessionTabId: persistedSessionTabId,
       viewerTab: activeViewerTab,
@@ -4056,6 +4277,7 @@ const SessionDetail = ({
     activeSidebarTab,
     activeSideSessionId,
     activeTabIsPendingChild,
+    docMetaCacheReady,
     activeTabSessionId,
     activeViewerTab,
     isSidebarOpen,
@@ -4210,8 +4432,7 @@ const SessionDetail = ({
       const target = resolveFocusedTabCloseTarget();
       if (!target) return 'handled';
       if (target.kind === 'landing') {
-        handleBackToList();
-        return 'handled';
+        return 'unhandled';
       }
       if (target.kind === 'side-panel') {
         handleSidePanelTabClose(target.tabId);
@@ -4264,8 +4485,8 @@ const SessionDetail = ({
   // The sheet needs the status TYPE, not just presence: a tab blocked on a
   // permission request must read as "needs you", not as one more spinner.
   const conversationSessionIds = useMemo(
-    () => orderedSessionTabIds.filter((id) => !isDraftSessionTabId(id)),
-    [orderedSessionTabIds]
+    () => allOrderedSessionTabIds.filter((id) => !isDraftSessionTabId(id)),
+    [allOrderedSessionTabIds]
   );
   const conversationLiveStatusAtom = useMemo(
     () =>
@@ -4374,11 +4595,10 @@ const SessionDetail = ({
     t,
   ]);
 
-  // Archived child conversations for the tab sheet's collapsed Archived group
-  // (most recent activity first, mirroring the desktop archived-tabs popover).
+  // Shared closed conversations include legacy archives and the main tab.
   const mobileArchivedConversations = useMemo(
     () =>
-      archivedChildSessions
+      closedConversations
         .map((archivedSession) => {
           const lastMessageAt =
             typeof archivedSession.lastMessageAt === 'number'
@@ -4388,22 +4608,23 @@ const SessionDetail = ({
           return {
             id: archivedSession.id as string,
             title: archivedSession.title ?? '',
+            running: conversationLiveStatusMap[archivedSession.id] != null,
+            waitingPermission:
+              conversationLiveStatusMap[archivedSession.id]?.type === 'requestPermission',
+            unread: sessionHasUnreadMessages(archivedSession),
             lastActivityAt: lastMessageAt ?? (Number.isFinite(createdAtMs) ? createdAtMs : null),
           };
         })
         .sort((a, b) => (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0)),
-    [archivedChildSessions]
+    [closedConversations, conversationLiveStatusMap]
   );
 
-  // Restore an archived conversation from the tab sheet and switch to it.
+  // Reopen through the same lifecycle-aware action used by the desktop list.
   const handleMobileRestoreConversation = useCallback(
     (id: string) => {
-      void (async () => {
-        await handleTabRestore(id as SessionId);
-        handleSessionTabSelect(id as SessionId);
-      })();
+      void handleTabRestore(id as SessionId);
     },
-    [handleTabRestore, handleSessionTabSelect]
+    [handleTabRestore]
   );
 
   const handleMobileViewerSelect = useCallback(
@@ -4568,7 +4789,7 @@ const SessionDetail = ({
     <div className="absolute inset-0 flex h-full flex-col items-center justify-center gap-3">
       {showPendingChildTabState ? (
         <>
-          <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+          <Spinner className="h-5 w-5 text-muted-foreground" />
           <p className="text-sm text-muted-foreground">
             {t('sessions.tabWaitingForSync', 'Waiting for this conversation to sync…')}
           </p>
@@ -4894,7 +5115,7 @@ const SessionDetail = ({
           ) : activeSessionSharing.visibility === 'private' ? (
             <LockKeyhole className="h-3.5 w-3.5" />
           ) : (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            <Spinner className="h-3.5 w-3.5" />
           ),
         label: t('sessions.sharing.visibility', 'Visibility'),
         value: `${getSessionSharingLabel(t, activeSessionSharing)} — ${getSessionSharingDescription(t, activeSessionSharing)}`,
@@ -4918,7 +5139,7 @@ const SessionDetail = ({
           mobileMenuActions.push({
             id: 'fork',
             icon: pendingFork ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              <Spinner className="h-3.5 w-3.5" />
             ) : (
               <GitFork className="h-3.5 w-3.5" />
             ),
@@ -4983,6 +5204,22 @@ const SessionDetail = ({
         void handleCopyUrl();
       },
     });
+    // Share-as-image arms message selection inside the chat surface, so it is
+    // only offered while that surface is the one on screen: a draft has no
+    // conversation and a viewer tab covers the rows being picked.
+    if (!activeDraftTab && !hasActiveViewerTab) {
+      mobileMenuActions.push({
+        id: 'share-image',
+        icon: <Image className="h-3.5 w-3.5" />,
+        label: t('sessions.shareAsImage', 'Share as image…'),
+        onClick: () => {
+          void handleShareAsImage().catch((error: unknown) => {
+            console.error('Failed to load conversation for image sharing', error);
+            toast.error(t('sessions.shareImage.empty', 'No conversation to share'));
+          });
+        },
+      });
+    }
     // Copy URL stays available for private sessions (the link still works for
     // the owner); sharing is a separate action shown only while the
     // conversation isn't team-visible.
@@ -4991,7 +5228,7 @@ const SessionDetail = ({
         id: 'share-with-team',
         icon:
           activeSessionSharing.visibility === 'unknown' ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            <Spinner className="h-3.5 w-3.5" />
           ) : activeSessionSharing.privateReason === 'machine-not-registered' ? (
             <Monitor className="h-3.5 w-3.5" />
           ) : activeSessionSharing.canManage ? (
@@ -5105,8 +5342,14 @@ const SessionDetail = ({
           onNewConversation={handleNewTab}
           onSelectViewer={handleMobileViewerSelect}
           onRestoreConversation={handleMobileRestoreConversation}
+          onCloseConversation={(id) => {
+            void handleTabClose(id);
+          }}
         />
-        <MobileSessionMenuSheet
+        <SessionShareMobileMenu
+          key={`${currentWorkspaceId}:${activeTabSessionId}`}
+          workspaceId={currentWorkspaceId}
+          session={activeDraftTab || hasActiveViewerTab ? null : activeTabSession}
           open={mobileMenuSheetOpen}
           onOpenChange={setMobileMenuSheetOpen}
           infoRows={mobileMenuInfoRows}
@@ -5545,6 +5788,16 @@ const SessionDetail = ({
           target={renameDialogTarget}
           onClose={() => setRenameDialogTarget(null)}
         />
+        <ChatShareImageDialog
+          open={shareImageTarget != null}
+          onOpenChange={(open) => {
+            if (!open) setShareImageTarget(null);
+          }}
+          onCompleted={handleShareImageCompleted}
+          session={shareImageTarget?.session ?? null}
+          messages={shareImageTarget?.messages ?? []}
+          agentName={shareImageTarget?.agentName}
+        />
       </div>
     );
   }
@@ -5715,7 +5968,16 @@ const SessionDetail = ({
       onShareWithTeam={
         showSessionSharing ? () => handleRequestShareSession(activeSession) : undefined
       }
-      onShareAsImage={activeDraftTab ? undefined : handleShareAsImage}
+      onShareAsImage={
+        activeDraftTab
+          ? undefined
+          : () => {
+              void handleShareAsImage().catch((error: unknown) => {
+                console.error('Failed to load conversation for image sharing', error);
+                toast.error(t('sessions.shareImage.empty', 'No conversation to share'));
+              });
+            }
+      }
       onOpenPrTab={handleOpenPrTab}
       onNavigateSession={handleNavigateSession}
       browserActionSession={activeBrowserSession}
@@ -5742,7 +6004,7 @@ const SessionDetail = ({
       onNewTab={handleNewTab}
       onTabRename={handleTabRename}
       onTabClose={handleTabClose}
-      archivedChildSessions={archivedChildSessions}
+      archivedChildSessions={closedConversations}
       onTabRestore={handleTabRestore}
       onTabReorder={handleSessionTabReorder}
       onMentionSession={handleInsertDroppedSessionMention}
@@ -5753,12 +6015,11 @@ const SessionDetail = ({
         // collapsed, over the horizontally-cleared `pl-[4.5rem]` gap below),
         // never over this top bar — so it must not reserve vertical inset.
         //
-        // `mt-0.5`, not `mt-2`: the tab pills share a top border line with the
-        // sidebar and side-panel cards, and both of those sit at `mt-2` (8px).
-        // The h-8 pills are centered inside this h-11 row, so the row must start
-        // 6px higher for them to land on that same line: 2 + (44 - 32) / 2 = 8.
-        // Re-derive this if the row or the pill height changes.
-        'mt-0.5 h-11',
+        // Flush with the window/sidebar top so this h-11 row shares y=0 with
+        // the sidebar header; the macOS row pad centers its controls on the
+        // traffic-light centerline. Re-derive if the row or pill height changes.
+        'h-11',
+        macTrafficLightRowPadClass,
         isLeftSidebarHidden && hasMacOSTitlebarInset && 'pl-[4.5rem]',
         !isSidebarVisible && windowsCaptionPadClass
       )}
@@ -5812,7 +6073,7 @@ const SessionDetail = ({
 
   const desktopChatSurfaces = (
     <SessionMentionDropLayer
-      enabled
+      enabled={!isEmptyConversation}
       excludeSessionId={sessionMentionExcludeId}
       onDropSessionId={handleInsertDroppedSessionMention}
     >
@@ -5912,12 +6173,12 @@ const SessionDetail = ({
     });
 
   // White reading surface (not bg-sidebar): the file editor/monaco canvas is
-  // pure white, so a gray panel shell left a two-tone mismatch. Match the
-  // surrounding cool-white chrome; keep a light border + soft shadow for card lift.
+  // pure white, so a gray panel shell left a two-tone mismatch. Full-bleed
+  // panel with a left hairline against the conversation.
   const desktopSecondaryPanel = (
     <div
       data-lody-session-tab-region="side-panel"
-      className="mx-2 mb-2 mt-2 flex h-[calc(100%_-_1rem)] min-w-0 flex-col overflow-hidden rounded-xl border border-border/70 bg-background shadow-[0_1px_3px_-1px_rgba(15,17,21,0.08),0_1px_2px_rgba(15,17,21,0.04)]"
+      className="flex h-full min-w-0 flex-col overflow-hidden border-l border-border/70 bg-background"
     >
       <SessionSidePanelTabBar
         tabs={sidePanelTabs}
@@ -5940,8 +6201,10 @@ const SessionDetail = ({
         className={cn(
           'border-b border-border/50 bg-background',
           // Right panel is never under the macOS traffic lights (top-left) —
-          // it must not reserve the titlebar inset the left sidebar needs.
+          // it must not reserve the titlebar inset the left sidebar needs. It
+          // still shares the traffic-light centerline with the main tab bar.
           'h-11',
+          macTrafficLightBorderedRowPadClass,
           windowsCaptionPadClass
         )}
       />
@@ -5952,10 +6215,6 @@ const SessionDetail = ({
             panels={sidePanelOptions}
             onPanelOpen={handleSidePanelOptionOpen}
             title={t('sessions.sidebar.emptyTitle', 'Open a panel')}
-            description={t(
-              'sessions.sidebar.emptyDescription',
-              'Choose what you want to see in this sidebar.'
-            )}
           />
         ) : null}
         {desktopSideSessionSurfaces}
@@ -6025,6 +6284,7 @@ const SessionDetail = ({
         onOpenChange={(open) => {
           if (!open) setShareImageTarget(null);
         }}
+        onCompleted={handleShareImageCompleted}
         session={shareImageTarget?.session ?? null}
         messages={shareImageTarget?.messages ?? []}
         agentName={shareImageTarget?.agentName}

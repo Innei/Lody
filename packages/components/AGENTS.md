@@ -10,6 +10,8 @@ mobile surfaces. Background for the rules below:
 ## General rules
 
 - Regenerate TanStack routes after changing route files.
+- Use `pnpm --filter @lody/components dev` to generate and format the route tree
+  with Oxfmt before CI compares it with the committed file.
 - Add Storybook coverage for new presentational components and meaningful states.
 - All user-visible copy must go through i18n.
 - Compact number units (K/M/B vs 万/亿) follow the product language via
@@ -27,6 +29,18 @@ mobile surfaces. Background for the rules below:
   intentionally public or narrowly token-scoped DTO.
 - Renderer and worker builds that cannot use native top-level await must use
   `vite-top-level-await-fixed.ts`. Do not bypass its audited-version assertion.
+- Keep accidental weight out of the test module graph: Vitest re-evaluates a
+  file's whole import graph per test file. Do not re-export a heavy leaf from
+  `src/ui/index.ts`, deep-import `date-fns/locale/<tag>` rather than the barrel,
+  and keep the icon-asset `new URL` glob alone in
+  `src/components/icons/file-icons/asset-url.ts` so the test alias can replace
+  it. Rationale and measurements:
+  [module graph note](../../.agents/notes/implemented/testing/2026-09-10-components-test-module-graph.md).
+- `vitest.config.ts` deliberately omits `vite-plugin-top-level-await` and
+  `vite-tsconfig-paths`; `vite.config.ts` keeps both because the product bundle
+  needs them. The plugin reads `tsconfig.vite.json`; keep the type-only React
+  mappings from `tsconfig.json` out of the runtime resolver. Run the suite with
+  `NODE_ENV=test` — a `production` value resolves React to a build without `act`.
 - System theme state, persistence, and browser preference tracking are owned by
   `next-themes`. Keep Lody's wrapper focused on preview state, fixed VS Code theme
   application, and the Electron native-theme bridge.
@@ -47,6 +61,6 @@ at cache-clear level; local file routes must never silently fall back to cloud.
   [src/ui/AGENTS.md](src/ui/AGENTS.md).
 - Hooks: [src/hooks/AGENTS.md](src/hooks/AGENTS.md). Workspace runtime, transports, and
   presence: [src/providers/AGENTS.md](src/providers/AGENTS.md).
-- Sessions, mobile, chat, mentions, tasks, onboarding, settings, and Codex reset
+- Sessions, mobile, chat, mentions, onboarding, settings, and Codex reset
   forecast each own an `AGENTS.md` under `src/components/`. Commands and shortcuts:
   [src/lib/commands/AGENTS.md](src/lib/commands/AGENTS.md).

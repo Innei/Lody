@@ -38,20 +38,15 @@ Run policy tests.
 
 <!-- context-handoff:begin -->
 
-### Instructions for reviewing agents
+### Original user prompt
 
-- **Review focus:** Check policy transitions.
-- **Decisions to challenge:** Confirm bypass semantics.
-- **Plausible failures / evidence gaps:** API calls use fakes.
+\`\`\`text
+Simplify the pull request contribution policy.
+\`\`\`
 
-### Authoring context
+### Shared conversation
 
-- **User goal / directives:** Simplify PR policy.
-- **Constraints / non-goals:** Never execute fork code.
-- **Risk-bearing decisions:** Repository identity classifies PRs.
-- **Destructive or irreversible behavior:** Expired PRs close.
-- **Deliberately not done or tested:** No live API writes.
-- **Unknowns / confidence:** Policy behavior is deterministic.
+https://lody.example/s/demo#access=v1.demo
 
 <!-- context-handoff:end -->
 `;
@@ -211,15 +206,11 @@ void describe('pull request validation', () => {
         finding.includes('require a maintainer assignment on the linked Issue')
       )
     );
-    assert.deepEqual(activity.issueReads, [
-      { owner: 'LodyAI', repo: 'Lody', issue_number: 121 },
-    ]);
+    assert.deepEqual(activity.issueReads, [{ owner: 'LodyAI', repo: 'Lody', issue_number: 121 }]);
   });
 
   void it('accepts community PRs over 1000 lines when the author is assigned', async () => {
-    const issues = new Map([
-      [121, { assignees: [{ login: 'contributor' }] }],
-    ]);
+    const issues = new Map([[121, { assignees: [{ login: 'contributor' }] }]]);
     const { github } = createGithub({ issues });
     const result = await reconcilePullRequest({
       github,

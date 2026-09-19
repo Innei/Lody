@@ -1,6 +1,11 @@
 import { useId, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { TFunction } from 'i18next';
+import type { SessionRowOpenedByTreeSlot } from './session-row-leading-slot';
+export {
+  SessionRowLeadingSlot,
+  buildSessionRowOpenedByTreeSlot,
+  type SessionRowOpenedByTreeSlot,
+} from './session-row-leading-slot';
 import {
   Check,
   ChevronDown,
@@ -8,15 +13,14 @@ import {
   CornerLeftUp,
   Github,
   Hand,
-  Loader2,
-  MoreHorizontal,
   X,
   type LucideIcon,
 } from 'lucide-react';
+import { Spinner } from '@/ui/spinner';
 import type { PrStatus, SessionPullRequestCiState } from '@lody/shared';
 import { cn } from '@/lib/utils';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/ui/tooltip';
-import { ContextMenuItem, ContextMenuSeparator } from '@/ui/context-menu';
+import { ContextMenuItem } from '@/ui/context-menu';
 import { Skeleton } from '@/ui/skeleton';
 import { PR_STATUS_META } from '@/components/sessions/pull-request-badge';
 import { SidebarConfirmArchiveButton } from '@/components/sidebar-confirm-archive-button';
@@ -31,12 +35,12 @@ import { getGitHubOwnerAvatarUrl } from '@/lib/github-avatar';
  * flat Updated list in `sidebar-updated-task-list.tsx`) render the same anatomy,
  * so the pieces live here once instead of being copied three times.
  *
- * Row anatomy: `[① tree affordance | more][② author avatar? + title][③ status | diff/mergeable? + worktree? + PR icon? | archive]`.
+ * Row anatomy: `[① tree affordance | more][② author avatar? + title][③ status | mergeable? + worktree? + PR icon? | archive]`.
  * The author avatar (`SessionRowAuthorAvatar`) only appears in team ("All Tasks") scope on a
  * multi-member workspace; otherwise the title owns the leading edge of slot ②. The leading slot
  * stays reserved even when empty (the ⋯ menu button reveals there on hover). A local worktree
  * session shows a faint worktree glyph (`SessionRowWorktreeIndicator`) inside the metric cluster,
- * between the line diff and the PR icon (taking the PR's right-edge spot when there is no PR);
+ * immediately before the PR icon (taking the PR's right-edge spot when there is no PR);
  * GitHub sessions are always worktrees so they never show it. The full
  * repo / folder / worktree session-type detail still lives in the desktop hover info card
  * (`session-info-hover-card.tsx`).
@@ -44,8 +48,8 @@ import { getGitHubOwnerAvatarUrl } from '@/lib/github-avatar';
  * The END slot (③) is the row's single status channel: working / waiting / unread
  * REPLACES the whole resting metric cluster there, so an active row reads
  * `[title][status]` and nothing else competes with it. Only a resting row shows
- * metrics, where PR status owns the right edge when present with the line diff
- * immediately before it. Archive replaces the trailing content on hover, so the
+ * metrics, where PR status owns the right edge when present. Line totals stay
+ * off the row (hover card only). Archive replaces the trailing content on hover, so the
  * row's rightmost mark never shifts. The leading slot (①) is therefore free to
  * ALWAYS draw the opened-by tree: a running or unread child keeps its ├/└ and an
  * active opener keeps its disclosure.
@@ -57,9 +61,8 @@ type PrCiVerdict = 'success' | 'failure' | 'pending' | 'expected';
 /**
  * PR + CI use the original 14px PR / 10px verdict-slot geometry. The circular
  * mask removes the PR stroke beneath the verdict without painting a
- * sidebar-colored backdrop, so the cutout stays transparent on hover and
- * selected-row surfaces. The base keeps its PR-status tone; only the verdict
- * uses the CI-state tone. Running uses a static dot and a tighter cutout.
+ * sidebar-colored backdrop. The info bar ContextChip uses this same
+ * `SessionPrIcon`. Running uses a static dot and a tighter cutout.
  */
 function MaskedPrCiIcon({
   BaseIcon,
@@ -145,12 +148,7 @@ function SessionRowStatusIndicator({
   if (isWaitingPermission) {
     icon = <Hand className="h-3 w-3 text-status-warning" />;
   } else if (isWorking) {
-    icon = (
-      <Loader2
-        data-session-working-spinner=""
-        className="h-3 w-3 shrink-0 animate-spin text-primary will-change-transform"
-      />
-    );
+    icon = <Spinner data-session-working-spinner="" className="h-3 w-3 shrink-0 text-primary" />;
   } else if (hasUnreadMessages) {
     icon = <span className="h-2 w-2 rounded-full bg-primary" />;
   }
@@ -226,7 +224,7 @@ export function SessionPrIcon({
         VerdictIcon={VerdictIcon}
         baseToneClassName={meta.iconColorClassName}
         verdict={verdict}
-        className={className}
+        className={cn(prStatus === 'merged' && 'translate-x-px', className)}
       />
     );
   }
@@ -280,7 +278,7 @@ export function SessionRowAuthorAvatar({
 
 /**
  * A faint worktree glyph shown inside the end slot's metric cluster, sitting to
- * the LEFT of the PR icon and to the RIGHT of the line diff — so a worktree
+ * the LEFT of the PR icon — so a worktree
  * session with a PR reads `[diff][worktree][PR]`, and one without a PR keeps the
  * glyph at the right edge where the PR icon would otherwise be. It marks a
  * session running in an isolated git worktree, reusing the same glyph the
@@ -310,61 +308,6 @@ export function SessionRowWorktreeIndicator({ isWorktree }: { isWorktree?: boole
 }
 
 /**
- * Tree state for the shared leading slot. The opener keeps the 14px slot; a
- * child widens it to 26px (12px title indent). Idle children draw ├/└; an
- * active child shows only status at the same 7px node as ⋯. A working opener
- * likewise shows the status spinner instead of its disclosure — loading
- * outranks folding.
- */
-export type SessionRowOpenedByTreeSlot =
-  | {
-      kind: 'opener';
-      expanded: boolean;
-      label: string;
-      onToggle: () => void;
-    }
-  | {
-      kind: 'child';
-      isLastChild: boolean;
-    };
-
-const TREE_CHILD_SLOT_CLASS = 'w-[26px] justify-start';
-const TREE_CONTROL_LEFT_CLASS = 'left-[7px]';
-const TREE_LINE_CLASS = 'bg-sidebar-foreground/20';
-/** Cover row padding/border from the 14px slot, plus 1px for list `gap-px`. */
-const TREE_TRUNK_FROM_PREV_CLASS = '-top-2';
-const TREE_TRUNK_INTO_NEXT_CLASS = '-bottom-[9px]';
-
-/**
- * Maps one {@link OpenedBySessionTreeNode} to the leading slot's tree state.
- * Every session list renders the same three cases (opener with a disclosure,
- * nested child with a connector, plain flat row), so the mapping — including
- * the disclosure's i18n label — lives here rather than in each list.
- *
- * `onToggle` absent means the caller cannot fold, so an opener degrades to a
- * plain row rather than showing a dead control.
- */
-export function buildSessionRowOpenedByTreeSlot(
-  node: { depth: 0 | 1; childCount: number; expanded: boolean; isLastChild: boolean },
-  t: TFunction,
-  onToggle?: () => void
-): SessionRowOpenedByTreeSlot | undefined {
-  if (node.childCount > 0 && onToggle) {
-    return {
-      kind: 'opener',
-      expanded: node.expanded,
-      label: node.expanded
-        ? t('sessions.openedBy.collapse', 'Hide opened sessions')
-        : t('sessions.openedBy.expand', 'Show {{count}} opened sessions', {
-            count: node.childCount,
-          }),
-      onToggle,
-    };
-  }
-  return node.depth === 1 ? { kind: 'child', isLastChild: node.isLastChild } : undefined;
-}
-
-/**
  * The two opened-by entries every sidebar row's context menu carries, in order:
  * the opener's expand/collapse (same toggle the leading-slot disclosure uses,
  * so the two can never disagree) and the reverse "Go to Opener Session" leg.
@@ -377,172 +320,29 @@ export function SessionRowOpenedByMenuItems({
   opener,
   goToOpener,
   goToOpenerLabel,
-  separateToggle = true,
 }: {
   opener?: Extract<SessionRowOpenedByTreeSlot, { kind: 'opener' }> | null;
   /** Omitted when this row has no opener, or the surface cannot navigate. */
   goToOpener?: () => void;
   goToOpenerLabel: string;
-  /** False when nothing follows the toggle in this menu. */
-  separateToggle?: boolean;
 }) {
   return (
     <>
-      {opener ? (
-        <>
-          <ContextMenuItem onSelect={opener.onToggle}>
-            <ChevronDown
-              className={cn('transition-transform', opener.expanded ? 'rotate-0' : '-rotate-90')}
-            />
-            {opener.label}
-          </ContextMenuItem>
-          {separateToggle ? <ContextMenuSeparator /> : null}
-        </>
-      ) : null}
       {goToOpener ? (
-        <>
-          <ContextMenuItem onSelect={goToOpener}>
-            <CornerLeftUp />
-            {goToOpenerLabel}
-          </ContextMenuItem>
-          <ContextMenuSeparator />
-        </>
+        <ContextMenuItem onSelect={goToOpener}>
+          <CornerLeftUp />
+          {goToOpenerLabel}
+        </ContextMenuItem>
+      ) : null}
+      {opener ? (
+        <ContextMenuItem onSelect={opener.onToggle}>
+          <ChevronDown
+            className={cn('transition-transform', opener.expanded ? 'rotate-0' : '-rotate-90')}
+          />
+          {opener.label}
+        </ContextMenuItem>
       ) : null}
     </>
-  );
-}
-
-/**
- * ① The opened-by tree affordance and the hover ⋯ button share one spot.
- * ⋯ synthesizes `contextmenu` so there is no second menu. Hover fades the rest
- * state (the disclosure or ├/└) without moving the title.
- *
- * The tree is drawn unconditionally: status lives in the END slot
- * ({@link SessionRowStatusIndicator}), so a working / unread / waiting row no
- * longer has to trade its nesting away for a status mark. A row that is neither
- * an opener nor a child still reserves the empty slot, so every title in the list
- * shares one x and the ⋯ button has somewhere to appear.
- */
-export function SessionRowLeadingSlot({
-  showMenuButton,
-  menuLabel,
-  openedByTree,
-  /** Fade the rest state while hovering (e.g. 'group-hover/row:opacity-0' for named groups). */
-  fadeClassName = 'group-hover:opacity-0 group-data-[menu-open]:opacity-0',
-  /** Disable an opener disclosure while its ⋯ replacement is active. */
-  restPointerClassName = 'group-hover:pointer-events-none group-data-[menu-open]:pointer-events-none',
-  /** Reveal the ⋯ button while hovering. */
-  revealClassName = 'group-hover:opacity-100 group-hover:pointer-events-auto group-data-[menu-open]:opacity-100 group-data-[menu-open]:pointer-events-auto',
-}: {
-  showMenuButton?: boolean;
-  menuLabel: string;
-  openedByTree?: SessionRowOpenedByTreeSlot;
-  fadeClassName?: string;
-  restPointerClassName?: string;
-  revealClassName?: string;
-}) {
-  const childTree = openedByTree?.kind === 'child' ? openedByTree : null;
-  const openerTree = openedByTree?.kind === 'opener' ? openedByTree : null;
-  const restClassName = showMenuButton
-    ? cn('transition-opacity duration-100', fadeClassName)
-    : undefined;
-  const controlLeftClassName = childTree ? TREE_CONTROL_LEFT_CLASS : 'left-1/2';
-
-  return (
-    <div
-      data-session-row-leading-slot=""
-      className={cn(
-        'relative flex h-3.5 shrink-0 items-center',
-        childTree ? TREE_CHILD_SLOT_CLASS : 'w-3.5 justify-center'
-      )}
-    >
-      {openerTree ? (
-        <button
-          type="button"
-          data-session-opened-by-toggle=""
-          aria-label={openerTree.label}
-          aria-expanded={openerTree.expanded}
-          title={openerTree.label}
-          onClick={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            openerTree.onToggle();
-          }}
-          className={cn(
-            'relative z-20 flex h-3.5 w-3.5 items-center justify-center rounded-sm',
-            'text-sidebar-foreground-muted transition-[opacity,color] duration-100',
-            'hover:text-sidebar-foreground focus-visible:outline-hidden',
-            showMenuButton && cn(restClassName, restPointerClassName)
-          )}
-        >
-          <ChevronDown
-            className={cn(
-              'h-3.5 w-3.5 transition-transform duration-150 ease-out',
-              openerTree.expanded ? 'rotate-0' : '-rotate-90'
-            )}
-            aria-hidden="true"
-          />
-        </button>
-      ) : childTree ? (
-        <div className={cn('absolute inset-0', restClassName)}>
-          <span
-            aria-hidden="true"
-            data-session-tree-connector="trunk"
-            className={cn(
-              'absolute w-px',
-              TREE_LINE_CLASS,
-              TREE_CONTROL_LEFT_CLASS,
-              TREE_TRUNK_FROM_PREV_CLASS,
-              childTree.isLastChild ? 'bottom-1/2' : TREE_TRUNK_INTO_NEXT_CLASS
-            )}
-          />
-          <span
-            aria-hidden="true"
-            data-session-tree-connector="elbow"
-            className={cn(
-              'absolute top-1/2 h-px w-[13px]',
-              TREE_LINE_CLASS,
-              TREE_CONTROL_LEFT_CLASS
-            )}
-          />
-        </div>
-      ) : null}
-      {showMenuButton ? (
-        <button
-          type="button"
-          aria-label={menuLabel}
-          onClick={(event) => {
-            // Open the row's existing right-click menu from a left click on ⋯.
-            event.preventDefault();
-            event.stopPropagation();
-            const rect = event.currentTarget.getBoundingClientRect();
-            event.currentTarget.dispatchEvent(
-              new MouseEvent('contextmenu', {
-                bubbles: true,
-                cancelable: true,
-                clientX: Math.round(rect.left),
-                clientY: Math.round(rect.bottom),
-              })
-            );
-          }}
-          className={cn(
-            // Overlay a 20px hit target centered on the 14px leading slot so the ⋯
-            // gets a visible rounded hover chip (it reads as clickable) without
-            // the tiny slot footprint clipping the background.
-            'absolute top-1/2 z-20 flex h-5 w-5 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-md opacity-0 pointer-events-none',
-            controlLeftClassName,
-            'text-sidebar-foreground-muted transition-[opacity,color,background-color] duration-100',
-            'hover:bg-sidebar-foreground/15 hover:text-sidebar-foreground',
-            // The trigger itself stays pressed-looking while its menu is open,
-            // not just the row around it.
-            'group-data-[menu-open]:bg-sidebar-foreground/15 group-data-[menu-open]:text-sidebar-foreground',
-            revealClassName
-          )}
-        >
-          <MoreHorizontal className="relative -top-px h-3.5 w-3.5" />
-        </button>
-      ) : null}
-    </div>
   );
 }
 
@@ -614,14 +414,14 @@ export function SidebarRowArchiveButton({
  * ③ The final slot at the row's right edge, and the row's ONE status channel.
  *
  * A working / waiting / unread session shows only its status mark here: the
- * resting content (line diff, `Mergeable`, worktree glyph, PR icon, time) is
+ * resting content (`Mergeable`, worktree glyph, PR icon, time) is
  * dropped for as long as the status lasts. That is deliberate — the status is the
  * fact the user is watching, the metrics are still one hover away in the desktop
  * info card, and collapsing them keeps the right edge to a single 14px mark
  * instead of a cluster that competes with it and eats the title.
  *
- * Archive is absolutely overlaid on hover, so a wide diff never causes layout
- * movement. When the rest content is absent but Archive is available, it still
+ * Archive is absolutely overlaid on hover, so a wide rest cluster never causes
+ * layout movement. When the rest content is absent but Archive is available, it still
  * reserves the action's 20px hit target.
  */
 export function SidebarRowEndSlot({
@@ -655,7 +455,7 @@ export function SidebarRowEndSlot({
   );
   const hasRest = Boolean(restContent);
   // Reserve the action hit target whenever something can occupy it; otherwise the
-  // slot sizes to its resting content (for example, a +/- line diff).
+  // slot sizes to its resting content (for example, a PR icon).
   const reserve = hasRest || Boolean(archive);
   return (
     // pointer-events-none so the resting PR icon area still passes clicks through to
@@ -712,13 +512,13 @@ export function GitHubOwnerIcon({
 
 // Shared section-header metrics. Every sidebar organize mode (Workspace local
 // project / GitHub Worktrees sections and the flat Updated list) uses these so
-// section labels read identically (13px medium, muted — full muted token, not a
+// section labels read identically (0.9em medium, muted — full muted token, not a
 // further /55 fade: that made "Pinned"/"Chats" and the filter icon nearly
 // illegible on light sidebars).
 const SECTION_HEADER_BUTTON_CLASS = cn(
   'relative flex h-7 min-w-0 flex-1 select-none items-center gap-1.5 rounded-md px-2 text-left',
   'border border-transparent bg-transparent',
-  'text-[13px] font-medium text-sidebar-foreground-muted transition-colors',
+  'text-[0.9em] font-medium text-sidebar-foreground-muted transition-colors',
   // The outer row paints the focus ring; suppress the global :focus-visible
   // box-shadow here so the ring wraps the whole row (label + action).
   'focus-visible:shadow-none'
@@ -842,10 +642,7 @@ export function SidebarListSkeleton({
         </div>
         <div className="flex flex-col gap-px">
           {SIDEBAR_SKELETON_ROW_WIDTHS.map((width, index) => (
-            <div
-              key={index}
-              className="flex h-7 min-w-0 items-center gap-1.5 rounded-md px-2"
-            >
+            <div key={index} className="flex h-7 min-w-0 items-center gap-1.5 rounded-md px-2">
               <Skeleton className="h-3.5 w-3.5 shrink-0 rounded-full" />
               <Skeleton className={cn('h-3 min-w-0', width)} />
               <Skeleton className="ml-auto h-3 w-8 shrink-0" />

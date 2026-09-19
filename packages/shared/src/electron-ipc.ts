@@ -402,6 +402,24 @@ export const ElectronAuthCallbackSessionSchema = z
 
 export type ElectronAuthCallbackSession = z.infer<typeof ElectronAuthCallbackSessionSchema>;
 
+export type ElectronLoginState = {
+  revision: number;
+  attemptId: string | null;
+  phase: 'idle' | 'waiting' | 'exchanging' | 'authenticated' | 'error';
+  session: ElectronAuthCallbackSession | null;
+  error:
+    | 'browser_open_failed'
+    | 'authorization_expired'
+    | 'exchange_failed'
+    | 'exchange_rejected'
+    | 'exchange_timeout'
+    | 'secure_storage_unavailable'
+    | 'restart_required'
+    | null;
+  /** Credential-free failure summary (HTTP status/server code or local error) for support. */
+  errorDetail: string | null;
+};
+
 export type ElectronUpdaterPhase =
   | 'idle'
   | 'checking'
@@ -680,12 +698,20 @@ export const GLOBAL_SHORTCUT_TRIGGERED_CHANNEL = 'app.globalShortcut';
 
 /**
  * Default binding per global shortcut, in the renderer's binding-string syntax
- * (`$mod+Shift+n`). The main process converts these to Electron accelerators via
+ * (`Mod+Shift+n`). The main process converts these to Electron accelerators via
  * `bindingToElectronAccelerator`.
  */
 export const GLOBAL_SHORTCUT_DEFAULTS: Record<GlobalShortcutId, string | null> = {
-  'app.focus': '$mod+Shift+l',
+  'app.focus': 'Mod+Shift+l',
 };
+
+/** Rewrite the pre-TanStack `$mod` token and normalize surrounding token whitespace. */
+export function migrateLegacyShortcutBinding(binding: string): string {
+  return binding
+    .split('+')
+    .map((token) => (token.trim().toLowerCase() === '$mod' ? 'Mod' : token.trim()))
+    .join('+');
+}
 
 /** A global shortcut's effective + default binding, surfaced to the renderer. */
 export type GlobalShortcutBinding = {
@@ -716,6 +742,7 @@ export type SetGlobalShortcutResult =
   | { ok: false; error: GlobalShortcutSetError };
 
 const GLOBAL_SHORTCUT_MODIFIER_TO_ACCELERATOR: Record<string, string> = {
+  // `$mod` remains read-compatible for settings persisted before the TanStack migration.
   $mod: 'CommandOrControl',
   mod: 'CommandOrControl',
   cmd: 'Command',
@@ -788,7 +815,7 @@ export function globalShortcutBindingHasModifier(binding: string | null | undefi
 }
 
 /**
- * Convert a binding-string (`$mod+Shift+l`) into an Electron accelerator
+ * Convert a binding-string (`Mod+Shift+l`) into an Electron accelerator
  * (`CommandOrControl+Shift+L`). Returns `null` when it can't be a usable global
  * accelerator — an unknown token, no key, or no primary modifier. Shift may be part
  * of the combo, but Shift-only globals would capture normal capitalization typing.

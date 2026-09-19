@@ -10,6 +10,12 @@ context/acp-agent-edit-evidence.md. Adapter source repositories and builtin prov
 [apps/cli/AGENTS.md](../../AGENTS.md). Where updates go after they arrive:
 context/message-flow.md "Upstream".
 
+| Boundary           | Owner                                        | Responsibility                                                               |
+| ------------------ | -------------------------------------------- | ---------------------------------------------------------------------------- |
+| ACP connection     | [AgentClient](agent-client.ts)               | Negotiates capabilities, tracks raw requests, and classifies steer evidence. |
+| Process startup    | [Runner](acp-runner.ts)                      | Spawns agents under the shared startup gate.                                 |
+| Runtime resolution | [Managed runtimes](managed-agent-runtime.ts) | Resolves pinned distributions and verifies their artifacts.                  |
+
 ## Files
 
 - `agent-client.ts` — the ACP connection: initialize/session lifecycle, client
@@ -23,7 +29,9 @@ context/message-flow.md "Upstream".
   `Session.createAgent`, `startLocalAcpAgent`, and history-catalog ACP spawn.
 - `setting.ts` — launch resolution for every agent kind.
 - `deepseek-harness-runtime.ts` — Harness-home (`DSH_HOME`, then `~/.dsh`), atomic-config,
-  and npx launch wrapper around the `packages/acp-extension-dsh` submodule.
+  and npx launch wrapper around the `packages/acp-extension-dsh` submodule. It converts
+  the adapter entry to a file URL for Cordis ESM imports, including Windows drive paths,
+  while preset and session directories remain filesystem paths.
 - `managed-agent-runtime.ts` — pinned Codex/Claude Code/Grok native and Kimi Node-package
   `.tar.zst` artifacts, checksums, resumable downloads, the active installation profile's
   `agent-binaries` layout, and best-effort `bin` symlinks for complete native CLIs.
@@ -90,19 +98,28 @@ critical path of every session establishment while the agent process sits idle.
 
 ### Steer delivery classification
 
-The applied-waiter must wait for the steer request's own answer before giving up on the
-upstream turn's response: the Codex adapter drains session notifications before refusing,
-so the turn's response routinely wins that race and would otherwise mask the refusal. A
-closed connection, a dead agent process, or an internal error may have left the prompt
-inside the live turn, and the caller re-sends an undelivered steer — so widening the
-"not delivered" classification sends the user's message twice.
+AgentClient converts adapter evidence into `applied`, `not-applied`, or `unknown`. The
+applied-waiter must wait for the steer request's own answer before giving up on the upstream
+turn's response: Codex may finish the interrupted turn before returning its definitive
+`failed` response. A closed connection, a dead agent process, or an internal error stays
+`unknown`, because the prompt may already be inside the live turn. Session execution consumes
+this outcome without interpreting provider errors or interruption state itself.
+
+`pendingPromptCompletion` aggregates raw prompt requests and request-transport steer
+submissions, even after a caller stops waiting locally. The session owner drains these before
+reuse or confirms termination of the old execution. A prompt response alone cannot release
+an unresolved steer submission. Application leases are released even if history projection
+fails; ending a local waiter never manufactures a provider refusal.
 
 ### DeepSeek Harness is not a managed runtime
 
-`deepseek-harness-runtime.ts` publishes Lody's versioned ACP composition beside (without
-replacing) user Harness config and launches the pinned explicit package closure through
-`dsh-acp-demo`. The all-in-one `@deepseek-ai/dsh` product CLI is deliberately not used
-because this ACP host excludes product UI and telemetry packages. CLI production and dev
+`deepseek-harness-runtime.ts` publishes Lody's content-addressed ACP profile beside (without
+replacing) user Harness config and launches the pinned package closure through
+`dsh --profile`. The generated profile composes `@deepseek-ai/dsh-base` with a Lody overlay
+that disables the product telemetry, request-inventory, and LLM-title rows, so the host keeps
+the upstream base composition without inheriting the web product surface. Never compose the
+product app bundles, and install every launcher package as an exact `name@version` (the Cordis
+ecosystem rides its own releases). CLI production and dev
 builds copy the extension's pinned official presets beside `deepseek-acp.js`; the generated
 roster also discovers `$DSH_HOME/.agent-presets`. The host mounts Harness's file settings
 provider for `$DSH_HOME/settings.yaml` (default `~/.dsh/settings.yaml`); refresh provider
@@ -186,8 +203,51 @@ override entries still apply only when their source-version suffix matches the s
 
 ### Session titles
 
-Builtin Claude owns session title generation through ACP `session_info_update`. Builtin Codex
-still uses the isolated generator in `title-generator.ts`, but its adapter tags every pushed
-title with `_meta.lody.titleSource`. Other providers use `title-generator.ts` /
-`response-utils.ts`. The shared `usesAcpProvidedSessionTitle()` predicate hides obsolete
-provider title settings only for Claude.
+Builtin Claude, Codex and Grok own session title generation through ACP
+`session_info_update`; Kimi and the DeepSeek Harness still use `title-generator.ts` /
+`response-utils.ts` and the `titleGeneration` config. `BUILTIN_ACP_TITLE_OWNERSHIP` in
+`packages/shared/src/ai.ts` is the single table behind both facts, and its doc comment
+carries the per-adapter mechanism; the audit evidence and what each remaining gap would
+cost to close live in the [decision note](../../../../.agents/notes/implemented/architecture/2026-09-08-acp-owned-session-titles.md).
+
+Two predicates read that table, and the difference between them is the part worth knowing.
+`acpOwnsSessionTitleGeneration()` keeps the isolated session out of an agent's title path
+and hides its obsolete title settings. `trustsUntaggedAcpSessionTitle()` is narrower: it
+answers whether a pushed title may be stored without a `_meta.lody.titleSource` tag, which
+is true only for the adapters that send no tag at all. Codex owns its generation but tags
+every title and previews the raw first prompt as `fallback`, so trusting it untagged would
+make that preview the session title.
+
+A runtime override revokes ownership. `BuiltinRuntimeOverrides` can aim the same
+`agentType` at an executable predating the title behaviour, and that session would otherwise
+get no title at all — generator skipped, nothing pushed, and the setting that would fix it
+hidden — so an overridden runtime keeps the local generator.
+
+The daemon does not name branches. A worktree session stays on the `session/<id>` branch
+`worktree-manager.ts` created for it, and `syncSessionBranchName` records whatever branch the
+session is actually on after every turn, so an agent that renames the branch itself is picked
+up. For GitHub projects the agent is asked to do exactly that — see
+`GITHUB_WORKTREE_SYSTEM_COMMANDS` in `session/session-execution-helpers.ts`.
+
+This used to be an automatic prompt-to-branch rename, removed because it could not be made
+safe. A branch name is a ref: it reaches the remote as soon as the session opens a PR, so
+deriving one from prompt text publishes prompt text, and "rotate the password before Friday"
+is an ordinary request. Two filters were tried and both failed for the same reason — a secret
+has no reliable shape, since `hunter2` is a password and an ordinary word. Stripping
+credential-shaped tokens left everything that did not look like one; failing closed on
+credential _syntax_ still let plain prose through, so it fails open on every miss and cannot
+be a security boundary. Naming refs after user text needs a source provably isolated from the
+prompt, and no such source exists at session-ready: the ACP title has not arrived yet, and the
+isolated generator's own fallback is the raw prompt.
+
+### Local project identity
+
+For local project sessions, `SessionManager` supplies a resolver for the original
+root in the local project catalog. `Session` and `createAcpClient` carry it to
+`AgentClient`, which invokes it only after the adapter advertises Core
+`worktreeProject` version 1 and the final execution directory has been claimed.
+The resolved metadata accompanies new/load/resume/fork and replacement sessions;
+ACP cwd remains the actual worktree. This also covers local child sessions,
+whose execution directory comes from their parent but whose project identity
+comes from the local project record. GitHub-only and projectless sessions do not
+send a local project identity. See the [draft contract](../../../../specs/local-project-acp-identity.zh.md).

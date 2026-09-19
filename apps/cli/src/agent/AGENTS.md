@@ -31,16 +31,12 @@ context/acp-agent-edit-evidence.md; adapter repos: [apps/cli/AGENTS.md](../../AG
   allowlist, never inheritance: keep `LODY_AUTH_URL`, `LODY_AUTH_SITE_URL`, and
   `LODY_SERVER_URL` so cloud MCP orchestration uses the daemon's deployment, let local platform
   assembly clear them before agent startup, and never add CLI credentials or secrets.
-- Pass the same MCP config on initial and replacement DeepSeek Harness sessions, and preserve
-  the driving Turn's `taskToolsEnabled` bit (HTTP header or stdio allowlisted env) across
-  replacement and restored sessions; missing/false keeps the server mounted but drops every
-  `lody_task_*` tool.
+- Pass the same MCP config on initial and replacement DeepSeek Harness sessions.
 - Workspace MCP resolution stays TWO phases: call `loadExternalMcpServers` BEFORE `initialize`,
   never between `initialize` and `newSession`.
-- Acknowledged steer is inject-or-refuse. `AgentSteerNotDeliveredError` marks ONLY a provable
-  refusal — local pre-write failure or the agent's own JSON-RPC `invalid request`; never widen
-  it. The applied-waiter must await the steer request's answer before giving up on the turn's
-  response.
+- Acknowledged steer ends `applied`, `not-applied`, or `unknown`. Only adapter proof maps
+  `not-applied`; transport/process ambiguity stays `unknown`. Await the request answer even
+  after the turn response; Session execution never classifies provider errors.
 
 ## Launch and runtimes
 
@@ -49,9 +45,9 @@ context/acp-agent-edit-evidence.md; adapter repos: [apps/cli/AGENTS.md](../../AG
   that gate.
 - `setting.ts`: every builtin requires `resolveACPProcessLaunchAsync()`.
 - `deepseek-harness-runtime.ts` is NOT a managed runtime: keep it out of runtime download,
-  prefetch, override, and interactive-auth flows, and launch the pinned closure, not the
-  all-in-one `@deepseek-ai/dsh` CLI. Credentials stay in the agent config environment;
-  never write them into the generated config. The adapter applies model/reasoning selection
+  prefetch, override, and auth flows. npx installs the closure; run `dsh --profile` with packaged
+  `process.execPath` and inherited `ELECTRON_RUN_AS_NODE`. Credentials stay in agent env; never
+  write them into the generated config. The adapter applies model/reasoning selection
   through the Agent-scoped request waterfall, permissions through Harness presets,
   and `agent_preset` through `AgentPresets.mount/recompose` — never as UI-only state. Presets
   may change only before the first prompt. Per-Agent ACP stdio/HTTP MCP servers belong in the
@@ -105,10 +101,11 @@ context/acp-agent-edit-evidence.md; adapter repos: [apps/cli/AGENTS.md](../../AG
   the cache, and requests/responses carry that id to keep configs of one provider isolated.
   `ManagedRuntimeUpdateCoordinator` never hot-swaps a running ACP process, and Machine Flock
   writes ignore `fetchedAt` when comparing entries.
-- Builtin Claude owns session titles through ACP `session_info_update`; store them only after
-  `sanitizeLodyInternalInstructions`, and never start `title-generator.ts`'s isolated session
-  for Claude. For Codex accept only `explicit` `_meta.lody.titleSource` names, ignore its
-  first-prompt `fallback`, and require `_meta.lody.messagePhase === 'final_answer'`; untyped
-  chunks, error/warning payloads, and internal-instruction tails are never candidates.
-  Each isolated run owns and removes a unique temp directory; concurrent session-title and
-  branch-name work reuses one in-flight result.
+- Builtin Claude, Codex and Grok own session titles
+  (`acpOwnsSessionTitleGeneration()`) unless a runtime override is set; store only after
+  `sanitizeLodyInternalInstructions`. Claude and Grok push untagged and are trusted
+  (`trustsUntaggedAcpSessionTitle()`); Codex is not — only `explicit` `titleSource` with
+  `messagePhase === 'final_answer'` qualifies, never its first-prompt `fallback`. Untyped chunks,
+  error/warning payloads and instruction tails never qualify.
+- NEVER derive a git ref from prompt text: refs reach the remote and no filter proves a
+  prompt secret-free. Worktree sessions keep `session/<id>` unless the agent renames it.

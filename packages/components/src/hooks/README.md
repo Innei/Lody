@@ -4,6 +4,39 @@ Binding rules for this directory live in [AGENTS.md](AGENTS.md); this file keeps
 the reasoning behind them so the rules can stay short. It explains only the hooks
 that carry an invariant — the directory itself is the list of hooks.
 
+| Area                   | Entry point                                                                                | Responsibility                                              |
+| ---------------------- | ------------------------------------------------------------------------------------------ | ----------------------------------------------------------- |
+| Session lifecycle      | [`use-session-actions.ts`](use-session-actions.ts)                                         | Bind operation targets and writes to one workspace runtime. |
+| Workspace catalogs     | [`use-agent-role-schema-reconciliation.ts`](use-agent-role-schema-reconciliation.ts)       | Reconcile owned Roles after matching runtime probes.        |
+| Conversation rendering | [`use-sticky-scroll.ts`](use-sticky-scroll.ts), [`use-session-doc.ts`](use-session-doc.ts) | Coordinate viewport ownership and history publication.      |
+
+## Session lifecycle
+
+`use-session-actions.ts` reads archive, restore, and archived-root deletion targets
+through `WorkspaceRuntime.readSessionOperationTargets`. The runtime owns source
+readiness and the Repo snapshot; the hook checks runtime identity before writing
+through its captured writer. UI projection lag cannot change the target set.
+Later-created Sessions fall outside that snapshot, and accepted writes are not
+rolled back after a later failure. Exact deletion and ordinary Tab close bypass
+discovery. The [relation Spec](../../../../specs/session-relations.md) owns cascade
+and failure semantics.
+
+## Default conversation draft
+
+`use-empty-session-draft.ts` materializes the empty conversation URL sentinel only
+after metadata hydration. It reuses an existing local draft or inserts one before
+selecting its URL; replayed effects must not create duplicate drafts. It never owns
+mobile viewer selection or creates a shared Session.
+
+## Horizontal wheel scrolling
+
+`use-horizontal-wheel-scroll.ts` is the one owner for converting a plain vertical
+mouse wheel into horizontal movement. It uses a non-passive native listener because
+React delegates wheel events passively, and releases native horizontal gestures,
+browser zoom, nested content selected by the caller, and movement at either edge.
+Compact tab strips use this behavior so their delta-mode normalization and edge
+handling cannot drift.
+
 ## Workspace membership refresh
 
 The cross-domain Better Auth `updateSession()` action returns `void`: it notifies
@@ -30,6 +63,16 @@ height matters: a flex sibling such as the desktop sidebar can animate its width
 every frame, and forwarding width-only records competes with the content observer's
 bottom correction and visibly jitters the conversation.
 
+First-window data readiness does not imply viewport readiness. A DOM `scrollTop`
+write can reach the estimated bottom while Virtua still has no destination rows,
+or has hidden unmeasured rows. Initial reveal waits for the virtualizer's offset,
+measured destination and visible-row geometry to agree. Direct row ResizeObserver
+records and spacer/row geometry commits drive this check without a settle timer.
+Those row records also correct following before the spacer's deferred resize;
+programmatic corrections use the library's scroll setter to preserve user-intent
+tracking. Only mounted rows are observed, and normal window loads never hide a
+previously revealed conversation.
+
 The composer one-shot ref preserves the reader's position while typing without
 changing keyboard, terminal, or window-resize follow behavior, which is why it is
 consumed for exactly one height resize and is not merged into programmatic-jump
@@ -46,6 +89,12 @@ sign-in request and successful page replacement. Timeouts, 5xx, and
 whose session is fine.
 
 ## Workspace catalog hooks
+
+`use-agent-role-schema-reconciliation.ts` runs from the ready workspace shell's
+window owner. It silently reconciles owned Roles after fresh, matching runtime
+probes, without requiring the Role editor. Repeated startup is idempotent; offline
+targets and failed probes remain retryable. See the
+[reconciliation Spec](../../../../specs/agent-role-schema-reconciliation.md).
 
 The workspace catalog is ONE small document, but a consumer mounts for every visible
 session plus every hidden child tab and side chat, so per-mount leases multiply room

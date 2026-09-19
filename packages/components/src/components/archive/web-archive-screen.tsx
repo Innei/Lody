@@ -5,7 +5,11 @@ import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
 import { navigationSidebarHiddenAtom, showNavigationSidebarAtom } from '@/atoms/layout-state';
 import { isMacOSElectronRenderer, useElectronFullscreen } from '@/lib/electron';
-import { useWindowDragRegionClass, useWindowsCaptionPadClass } from '@/ui/window-drag-region';
+import {
+  useMacTrafficLightRowPadClass,
+  useWindowDragRegionClass,
+  useWindowsCaptionPadClass,
+} from '@/ui/window-drag-region';
 import { isNativeAppShell } from '@/lib/native-platform';
 import { Button } from '@/ui/button';
 import {
@@ -54,6 +58,7 @@ export function WebArchiveScreen({
   const isElectronFullscreen = useElectronFullscreen();
   const windowDragClass = useWindowDragRegionClass();
   const windowsCaptionPadClass = useWindowsCaptionPadClass();
+  const macTrafficLightRowPadClass = useMacTrafficLightRowPadClass({ bottomBorder: true });
   // Traffic lights auto-hide in native fullscreen — no inset to reserve then.
   // Mirrors the same derivation in session-detail.tsx.
   const hasMacOSTitlebarInset =
@@ -67,9 +72,12 @@ export function WebArchiveScreen({
         <header
           className={cn(
             'flex h-[calc(2.75rem+var(--safe-area-top))] w-full shrink-0 items-center gap-3 border-b border-border bg-background pl-[calc(16px+var(--safe-area-left))] pr-[calc(16px+var(--safe-area-right))] pt-[var(--safe-area-top)]',
-            isLeftSidebarHidden && hasMacOSTitlebarInset && 'pl-[4.5rem]',
+            // Compensate for the button's -ml-1: its left edge sits at 96px,
+            // matching Chat Landing and clearing the traffic lights by 24px.
+            isLeftSidebarHidden && hasMacOSTitlebarInset && 'pl-[100px]',
             windowDragClass,
-            windowsCaptionPadClass
+            windowsCaptionPadClass,
+            macTrafficLightRowPadClass
           )}
         >
           {isLeftSidebarHidden ? (

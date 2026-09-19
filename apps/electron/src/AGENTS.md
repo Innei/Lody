@@ -33,10 +33,14 @@ native-dependency, and OSS-composition rules stay in `apps/electron/AGENTS.md`.
 
 ## Renderer and window integration
 
-- Desktop devbar diagnostics stay runtime opt-in (`LODY_DEVBAR=true`) and local to
-  memory. The compact GPU field identifies process CPU/RSS in its hover text;
-  never describe these measurements as hardware GPU usage or VRAM.
-  Enable precise Chromium heap reporting before app readiness only for devbar.
+- Only factory-registered product windows may invoke product-window IPC. Dialogs,
+  embedded browsers, navigation and close actions belong to their source window;
+  auxiliary windows must not overwrite the primary window's persisted view state.
+
+- Devbar is off by default; hidden Developer Mode enables it, while
+  `LODY_DEVBAR=true` is automation only. Keep data in memory and MCP/Terminals
+  behind `agentAccess`. GPU means process CPU/RSS, never hardware usage/VRAM.
+  Runtime heap is approximate; only the startup override enables precise readings.
 
 - Generic update metadata may carry localized Markdown under
   `vendor.lodyChangelog.locales.{en,zh_CN}` in addition to the standard English
@@ -48,6 +52,10 @@ native-dependency, and OSS-composition rules stay in `apps/electron/AGENTS.md`.
   PostHog reporting. De-duplicate the same error across React and window events.
   Renderer-mounted notification must come from a committed layout-effect sentinel,
   never a timer or microtask guess.
+- A CLI-armed reset (`lody app reset-cache`) is consumed once, before any window
+  loads. `hard` is applied natively here because the renderer may not boot; `cache`
+  is handed to the renderer exactly once, because only it can spare the Shortcut
+  outbox and individual localStorage keys. Spec: `specs/desktop-local-reset.md`.
 - Theme changes must also update the native window color in `window-theme.ts`.
   OS appearance changes while `themeSource` is `system` must retint chrome and
   notify the renderer (`app.nativeTheme`). On macOS also subscribe
@@ -61,7 +69,7 @@ native-dependency, and OSS-composition rules stay in `apps/electron/AGENTS.md`.
   (`MAIN_WINDOW_TITLE_BAR_OVERLAY_HEIGHT`); right-edge headers pad `pr-[144px]`
   so toolbar controls do not sit under them.
 - The onboarding window must be native Light before its first renderer paint; normal product windows start from the System theme source.
-  An automatic login launch may suppress the initial product window, but onboarding and deep-link launches must remain visible.
+  An automatic login launch may suppress the initial product window, but onboarding and deep-link launches must remain visible during normal product use. Unpackaged E2E windows are the exception: they stay hidden unless `LODY_E2E_SHOW_WINDOW=1` and always disable background throttling.
 - `sessionControl.send` streams intermediate responses on `sessionControl.response`
   keyed by request id. The renderer subscribes before `invoke`, removes the
   listener after settlement, and treats only the final response as completion.
@@ -92,7 +100,8 @@ native-dependency, and OSS-composition rules stay in `apps/electron/AGENTS.md`.
   menu, clipboard, and save dialog here because the renderer holds the only copy
   of the image (a `blob:` URL main cannot download). Bytes cross once, after the
   menu selection. Naming/filter logic stays in `image-export-core.ts` so it runs
-  under `node --test` without the `electron` runtime.
+  under `node --test` without the `electron` runtime. `context-menu.ts` draws every
+  other right-click and yields to it on images.
 
 ## Local file resources
 

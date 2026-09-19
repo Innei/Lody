@@ -1,17 +1,17 @@
 import {
   type ComponentPropsWithoutRef,
   type CSSProperties,
-  type KeyboardEvent as ReactKeyboardEvent,
-  type MouseEvent as ReactMouseEvent,
   type ReactNode,
+  createContext,
   useState,
+  useContext,
   useCallback,
-  useEffect,
   useMemo,
   useLayoutEffect,
   useRef,
   memo,
 } from 'react';
+import { createPortal } from 'react-dom';
 import { createMathPlugin } from '@streamdown/math';
 import rehypeRaw from 'rehype-raw';
 import rehypeSanitize from 'rehype-sanitize';
@@ -31,20 +31,15 @@ import {
 } from 'streamdown';
 import type { BundledLanguage } from 'shiki';
 import { Check, Copy } from 'lucide-react';
-import { useAtomValue } from 'jotai';
 import { useTranslation } from 'react-i18next';
-import { parseTaskImageMarkdownUrl } from '@lody/shared';
-import { DEFAULT_CONVERSATION_FONT_SIZE, tasksFeatureEnabledAtom } from '@/atoms/settings';
-import { FileIcon } from '@/components/icons/file-icons';
+import { DEFAULT_CONVERSATION_FONT_SIZE } from '@/atoms/settings';
+import { MonochromeFileIcon } from '@/components/icons/file-icons';
 import {
   isMarkdownAgentFileHref,
   parseMarkdownAgentFileHref,
 } from '@/lib/markdown-agent-file-link';
 import { matchWholeFilePath, splitTextIntoFilePathSegments } from '@/lib/linkify-file-paths';
-import {
-  normalizeTexMathDelimiters,
-  remarkSingleDollarTextMath,
-} from '@/lib/markdown-single-dollar-math';
+import { normalizeTexMathDelimiters } from '@/lib/markdown-single-dollar-math';
 import { cn } from '@/lib/utils';
 import { usePrLinkInterceptor } from './pr-link-context';
 import {
@@ -56,12 +51,33 @@ import {
 import { findSessionSearchOccurrences } from '@/lib/session-chat-search';
 import { useResolvedTheme } from '../../theme-provider';
 import type { ConversationFontSize } from '@/atoms/settings';
-import { useTaskImageUrl } from '@/hooks/use-task-image';
+import { MarkdownFencedCodeBlock } from './markdown-code-block';
 import { MarkdownDiffBlock } from './markdown-diff-block';
 import { createMarkdownMermaidConfig, createMarkdownMermaidPlugin } from './markdown-mermaid';
-import { MermaidDiagramViewer, type MermaidDiagramSelection } from './mermaid-diagram-viewer';
+import { MermaidDiagramViewer } from './mermaid-diagram-viewer';
+import { MermaidFullscreenButton, useMermaidDiagramCanvas } from './use-mermaid-diagram-canvas';
+import { SessionReadonlyContext } from './session-readonly-context';
+import type { MarkdownAgentFileLinkMenuItem } from '@/hooks/use-session-file-actions';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSub,
+  ContextMenuSubContent,
+  ContextMenuSubTrigger,
+  ContextMenuTrigger,
+} from '@/ui/context-menu';
 
 export { createMarkdownMermaidConfig } from './markdown-mermaid';
+
+/**
+ * Conversation surfaces provide this capability at their boundary. Rendering
+ * Markdown elsewhere (shared pages, file previews) deliberately has no native
+ * file-actions menu.
+ */
+export const AgentFileLinkContextMenuItemsContext = createContext<
+  ((href: string) => readonly MarkdownAgentFileLinkMenuItem[]) | undefined
+>(undefined);
 
 type MarkdownCodeProps = ComponentPropsWithoutRef<'code'> & {
   inline?: boolean;
@@ -175,17 +191,30 @@ const MARKDOWN_BASE_CLASSNAME =
   '[&_h5]:!mt-3 [&_h5]:!mb-1.5 [&_h5]:font-semibold [&_h5]:uppercase [&_h5]:tracking-wide ' +
   '[&_h6]:!mt-3 [&_h6]:!mb-1.5 [&_h6]:font-semibold [&_h6]:uppercase [&_h6]:tracking-wide [&_h6]:text-muted-foreground ' +
   '[&_:is(h1,h2,h3,h4,h5,h6):first-child]:!mt-0 ' +
-  '[&_a]:underline [&_a]:underline-offset-2 [&_a]:decoration-muted-foreground/40 [&_a:hover]:decoration-muted-foreground ' +
+  '[&_a]:text-markdown-link ' +
+  '[&_a]:underline [&_a]:underline-offset-2 [&_a]:decoration-current/35 [&_a:hover]:decoration-current/70 ' +
   '[&_.katex-display]:!my-5 [&_.katex-display]:overflow-x-auto [&_.katex-display]:overflow-y-hidden [&_.katex-display]:py-1 ' +
   '[&_[data-streamdown="mermaid-block"]]:!my-5 ' +
+  // Streamdown wraps every diagram in a pan/zoom canvas that claims the gesture
+  // through inline styles: `touch-action: none` stops a finger resting on a
+  // diagram from scrolling the conversation, and its transform moves the preview
+  // inside its own frame. Panning and zooming belong to the canvas
+  // `use-mermaid-diagram-canvas.tsx` activates on the `<svg>`, so Streamdown's
+  // own transform is pinned and touch is handed back to the page. The wheel it
+  // takes from a listener is out of CSS's reach and is intercepted there too.
+  '[&_[data-streamdown="mermaid"]_[role="application"]]:!touch-auto ' +
+  '[&_[data-streamdown="mermaid"]_[role="application"]]:!transform-none ' +
+  // The cursor and the activated ring are in `tailwind/index.css` under
+  // `.markdown-renderer`, beside the rest of the diagram's frame.
+  '[&_[data-streamdown="mermaid"]]:overflow-hidden ' +
   '[&_[data-streamdown="code-block"]]:!my-4 ' +
   '[&_table]:!my-0 [&_table]:w-full [&_table]:border-collapse [&_table]:text-[0.92em] [&_table]:leading-[1.5] ' +
-  '[&_th]:border-b [&_th]:border-border/70 [&_th]:bg-muted/45 [&_th]:px-2.5 [&_th]:py-1.5 [&_th]:text-left [&_th]:font-semibold [&_th]:text-foreground/80 ' +
+  '[&_th]:border-b [&_th]:border-border/70 [&_th]:bg-muted/20 [&_th]:px-2.5 [&_th]:py-1.5 [&_th]:text-left [&_th]:font-semibold [&_th]:text-foreground/80 dark:[&_th]:bg-muted/40 ' +
   '[&_td]:border-b [&_td]:border-border/45 [&_td]:px-2.5 [&_td]:py-1.5 [&_td]:align-top ' +
   '[&_tbody_tr:nth-child(even)]:bg-muted/15 [&_tbody_tr:last-child_td]:border-b-0 ' +
   '[&_:is(th,td):first-child]:w-px [&_:is(th,td):first-child]:whitespace-nowrap ' +
   '[&_tbody_td:first-child]:font-medium [&_tbody_td:first-child]:text-foreground/75 ' +
-  '[&_table_code]:!bg-muted/55 [&_table_code]:!ring-0';
+  '[&_table_code]:!bg-foreground/[0.08] [&_table_code]:!ring-0 dark:[&_table_code]:!bg-foreground/[0.14]';
 
 const MARKDOWN_SIZE_CLASSNAME =
   '[&_h1]:text-[length:var(--markdown-h1-font-size)] ' +
@@ -630,14 +659,6 @@ const remarkLinkifyFilePaths = () => {
   };
 };
 
-const MARKDOWN_REMARK_PLUGINS = [
-  remarkGfm,
-  remarkRepairMalformedGfmAutolinks,
-  remarkLinkifyPlainUrls,
-  remarkLinkifyFilePaths,
-  remarkSingleDollarTextMath,
-];
-
 const MARKDOWN_MATH_PLUGIN = createMathPlugin();
 
 type ShikiHighlighter = Awaited<ReturnType<(typeof import('shiki/core'))['createHighlighterCore']>>;
@@ -681,6 +702,45 @@ const MARKDOWN_CODE_LANGUAGE_SET = new Set<string>([
   ...MARKDOWN_CODE_LANGUAGES,
   ...Object.keys(MARKDOWN_CODE_LANGUAGE_ALIASES),
 ]);
+
+const FENCED_CODE_RENDERER_LANGUAGE_SET = new Set<string>([
+  ...MARKDOWN_CODE_LANGUAGE_SET,
+  'diff',
+  'text',
+  'plaintext',
+  'txt',
+]);
+
+// Fences rendered by other Streamdown plugins keep their language.
+const FENCED_CODE_PASSTHROUGH_LANGUAGE_SET = new Set<string>(['mermaid']);
+
+const remarkDefaultFencedCodeLanguage = () => (tree: unknown) => {
+  const walk = (node: MdastNode) => {
+    if (node.type === 'code') {
+      const codeNode = node as { lang?: string; meta?: string | null };
+      const lang = String(codeNode.lang ?? '').trim();
+      if (!lang) {
+        codeNode.lang = 'text';
+      } else if (
+        !FENCED_CODE_RENDERER_LANGUAGE_SET.has(lang.toLowerCase()) &&
+        !FENCED_CODE_PASSTHROUGH_LANGUAGE_SET.has(lang.toLowerCase())
+      ) {
+        codeNode.meta = [`highlight=${lang}`, codeNode.meta].filter(Boolean).join(' ');
+        codeNode.lang = 'text';
+      }
+    }
+    node.children?.forEach(walk);
+  };
+  if (typeof tree === 'object' && tree !== null) walk(tree as MdastNode);
+};
+
+const MARKDOWN_REMARK_PLUGINS = [
+  remarkGfm,
+  remarkRepairMalformedGfmAutolinks,
+  remarkLinkifyPlainUrls,
+  remarkLinkifyFilePaths,
+  remarkDefaultFencedCodeLanguage,
+];
 
 const normalizeCodeLanguage = (language: BundledLanguage): BundledLanguage | null => {
   const normalized = String(language).trim().toLowerCase();
@@ -851,6 +911,15 @@ const MARKDOWN_CODE_PLUGIN = createLazyShikiCodePlugin();
 
 const MARKDOWN_MERMAID_PLUGIN = createMarkdownMermaidPlugin();
 
+const FENCED_CODE_RENDERER_LANGUAGES = [
+  ...MARKDOWN_CODE_LANGUAGES,
+  ...Object.keys(MARKDOWN_CODE_LANGUAGE_ALIASES),
+  'diff',
+  'text',
+  'plaintext',
+  'txt',
+] as const;
+
 const STREAMDOWN_PLUGINS = {
   code: MARKDOWN_CODE_PLUGIN,
   math: MARKDOWN_MATH_PLUGIN,
@@ -859,6 +928,10 @@ const STREAMDOWN_PLUGINS = {
     {
       language: 'diff',
       component: MarkdownDiffBlock,
+    },
+    {
+      language: [...FENCED_CODE_RENDERER_LANGUAGES],
+      component: MarkdownFencedCodeBlock,
     },
   ],
 } satisfies PluginConfig;
@@ -880,9 +953,6 @@ const STREAMDOWN_CONTROLS = {
   },
   table: false,
 } satisfies ControlsConfig;
-
-/** Streamdown's wrapper around one rendered diagram, inside a `mermaid-block`. */
-const MERMAID_DIAGRAM_SELECTOR = '[data-streamdown="mermaid"]';
 
 /** Matches a fenced ```mermaid block, so blocks without one skip the observer. */
 const MERMAID_FENCE_PATTERN = /^[ \t]{0,3}(?:`{3,}|~{3,})[ \t]*mermaid\b/mu;
@@ -916,9 +986,7 @@ const writeTextToClipboard = async (text: string): Promise<boolean> => {
 };
 
 const markdownUrlTransform: UrlTransform = (value, key, node) =>
-  isMarkdownAgentFileHref(value) || (key === 'src' && parseTaskImageMarkdownUrl(value))
-    ? value
-    : defaultUrlTransform(value, key, node);
+  isMarkdownAgentFileHref(value) ? value : defaultUrlTransform(value, key, node);
 
 type MarkdownTableProps = ComponentPropsWithoutRef<'table'> & {
   node?: unknown;
@@ -930,16 +998,19 @@ const AgentFileLink = ({
   onFilePathClick,
   copyAgentFileLabel,
   openAgentFileLabel,
+  getContextMenuItems,
 }: {
   href: string;
   children: ReactNode;
   onFilePathClick?: (href: string) => void;
   copyAgentFileLabel: string;
   openAgentFileLabel: string;
+  getContextMenuItems?: (href: string) => readonly MarkdownAgentFileLinkMenuItem[];
 }) => {
   const [didCopy, setDidCopy] = useState(false);
   const hasOpenAction = Boolean(onFilePathClick);
   const iconPath = parseMarkdownAgentFileHref(href)?.filePath ?? href;
+  const contextMenuItems = getContextMenuItems?.(href) ?? [];
 
   const handleClick = useCallback(async () => {
     if (onFilePathClick) {
@@ -954,7 +1025,7 @@ const AgentFileLink = ({
     window.setTimeout(() => setDidCopy(false), 1200);
   }, [href, onFilePathClick]);
 
-  return (
+  const link = (
     <button
       type="button"
       onClick={() => {
@@ -963,39 +1034,102 @@ const AgentFileLink = ({
       title={href}
       aria-label={`${hasOpenAction ? openAgentFileLabel : copyAgentFileLabel}: ${href}`}
       className={cn(
-        'inline-flex max-w-full items-center gap-1 rounded-md border border-border/60 bg-muted/40 px-1.5 py-px align-[-0.15em] font-mono text-[0.92em] leading-tight text-foreground no-underline shadow-none transition-colors',
-        'hover:border-border hover:bg-muted focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2'
+        'm-0 inline-flex max-w-full items-baseline gap-1 rounded-sm border-0 bg-transparent p-0 align-baseline font-[inherit] leading-[inherit] text-markdown-link no-underline shadow-none transition-colors',
+        'hover:underline underline-offset-2 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2'
       )}
     >
-      <FileIcon filePath={iconPath} className="h-3.5 w-3.5 shrink-0" />
+      <MonochromeFileIcon
+        filePath={iconPath}
+        className="h-[1.38em] w-[1.38em] shrink-0 self-center"
+      />
       <span className="min-w-0 truncate">{children}</span>
       {!hasOpenAction ? (
         didCopy ? (
-          <Check className="h-3 w-3 shrink-0 text-emerald-600" />
+          <Check className="h-[0.85em] w-[0.85em] shrink-0 self-center" />
         ) : (
-          <Copy className="h-3 w-3 shrink-0 text-muted-foreground" />
+          <Copy className="h-[0.85em] w-[0.85em] shrink-0 self-center" />
         )
       ) : null}
     </button>
   );
+
+  if (contextMenuItems.length === 0) return link;
+
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger asChild>{link}</ContextMenuTrigger>
+      <ContextMenuContent className="min-w-[190px]">
+        {contextMenuItems.map((item) => {
+          const ItemIcon = item.icon;
+          if (item.kind === 'submenu') {
+            return (
+              <ContextMenuSub key={item.id}>
+                <ContextMenuSubTrigger icon={<ItemIcon className="h-3.5 w-3.5" />}>
+                  {item.label}
+                </ContextMenuSubTrigger>
+                <ContextMenuSubContent className="min-w-[190px]">
+                  {item.items.map((child) => {
+                    const ChildIcon = child.icon;
+                    return (
+                      <ContextMenuItem
+                        key={child.id}
+                        icon={<ChildIcon className="h-3.5 w-3.5" />}
+                        onSelect={child.run}
+                      >
+                        {child.label}
+                      </ContextMenuItem>
+                    );
+                  })}
+                </ContextMenuSubContent>
+              </ContextMenuSub>
+            );
+          }
+          return (
+            <ContextMenuItem
+              key={item.id}
+              icon={<ItemIcon className="h-3.5 w-3.5" />}
+              onSelect={item.run}
+            >
+              {item.label}
+            </ContextMenuItem>
+          );
+        })}
+      </ContextMenuContent>
+    </ContextMenu>
+  );
 };
+
+function isWorkspaceResourceHref(href: string): boolean {
+  try {
+    return (
+      isMarkdownAgentFileHref(href) ||
+      /\/(?:api\/)?workspaces\/|\/session-(?:images|files)\//i.test(decodeURIComponent(href))
+    );
+  } catch {
+    return true;
+  }
+}
 
 const createMarkdownComponents = ({
   copyAgentFileLabel,
   openAgentFileLabel,
   onAgentFileLinkClick,
+  getAgentFileLinkContextMenuItems,
+  readonly,
 }: {
   copyAgentFileLabel: string;
   openAgentFileLabel: string;
   onAgentFileLinkClick?: (href: string) => void;
+  getAgentFileLinkContextMenuItems?: (href: string) => readonly MarkdownAgentFileLinkMenuItem[];
+  readonly: boolean;
 }): Components => ({
   inlineCode: (props: MarkdownCodeProps) => {
     const { className, children, style: _style, node: _node, inline: _inline, ...rest } = props;
     return (
       <code
         className={cn(
-          'rounded-sm bg-code px-1 py-px font-mono text-[0.85em] text-code-foreground ring-1 ring-inset ring-border/50',
-          className
+          className,
+          'rounded-sm bg-foreground/[0.08] px-1 py-px font-mono text-[0.85em] text-foreground ring-0 dark:bg-foreground/[0.14]'
         )}
         {...rest}
       >
@@ -1016,6 +1150,11 @@ const createMarkdownComponents = ({
   },
   a: (props: MarkdownLinkProps) => {
     const { children, href, node: _node, rel, ...rest } = props;
+    // Workspace resource links are display-only in a publication, not a second
+    // download API. Ordinary article/GitHub links remain explicit external navigation.
+    if (readonly && href && isWorkspaceResourceHref(href)) {
+      return <span>{children}</span>;
+    }
 
     if (isMarkdownAgentFileHref(href)) {
       return (
@@ -1024,6 +1163,7 @@ const createMarkdownComponents = ({
           onFilePathClick={onAgentFileLinkClick}
           copyAgentFileLabel={copyAgentFileLabel}
           openAgentFileLabel={openAgentFileLabel}
+          getContextMenuItems={getAgentFileLinkContextMenuItems}
         >
           {children}
         </AgentFileLink>
@@ -1036,35 +1176,42 @@ const createMarkdownComponents = ({
       </MarkdownExternalLink>
     );
   },
-  img: TaskMarkdownImage,
+  img: ConversationMarkdownImage,
   // <picture> just passes through its children (the <img> fallback);
   // <source> is suppressed since it's only meaningful inside a real browser <picture>.
   source: () => null,
   picture: (props: MarkdownPictureProps) => <>{props.children}</>,
 });
 
-function TaskMarkdownImage(props: MarkdownImageProps) {
-  const { node: _node, src, alt, ...rest } = props;
-  const taskImageId = src ? parseTaskImageMarkdownUrl(src) : null;
-  const tasksEnabled = useAtomValue(tasksFeatureEnabledAtom);
-  const resolvedUrl = useTaskImageUrl(taskImageId && tasksEnabled ? src : undefined);
-
-  if (taskImageId && !tasksEnabled) return null;
-
-  if (taskImageId && !resolvedUrl) {
-    return (
+function ConversationMarkdownImage(props: MarkdownImageProps) {
+  const readonly = useContext(SessionReadonlyContext);
+  // No workspace URI fetch is mounted for an anonymous publication.
+  // Typed share images are handled separately through the manifest attachment reader.
+  if (readonly) {
+    const inline =
+      typeof props.src === 'string' &&
+      /^data:image\/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/=\s]+$/.test(props.src);
+    return inline ? (
+      <img
+        src={props.src}
+        alt={props.alt ?? ''}
+        className="my-2 max-h-[32rem] max-w-full rounded-md object-contain"
+      />
+    ) : (
       <span
         role="img"
-        aria-label={alt || 'Task image'}
-        className="my-2 block h-24 w-full max-w-sm animate-pulse rounded-md bg-muted"
-      />
+        aria-label={props.alt || 'Image'}
+        className="my-2 block text-sm text-muted-foreground"
+      >
+        {props.alt || 'Image'}
+      </span>
     );
   }
-
+  const { node: _node, src, alt, ...rest } = props;
   return (
     <img
       {...rest}
-      src={taskImageId ? resolvedUrl : src}
+      src={src}
       alt={alt ?? ''}
       className={cn('my-2 max-h-[32rem] max-w-full rounded-md object-contain', rest.className)}
     />
@@ -1107,141 +1254,55 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
 }) {
   const { t } = useTranslation();
   const resolvedTheme = useResolvedTheme();
+  const readonly = useContext(SessionReadonlyContext);
+  const getAgentFileLinkContextMenuItems = useContext(AgentFileLinkContextMenuItemsContext);
   const containerRef = useRef<HTMLDivElement>(null);
+  /** Whether this block currently holds search marks that need unwrapping. */
+  const markedRef = useRef(false);
   const search = useSessionSearch();
   const searchMatch = useSessionSearchBlock(searchBlockId ?? '');
   const copyCodeLabel = t('common.copyCode', 'Copy code');
   const copyAgentFileLabel = t('sessions.copyAgentFilePath', 'Copy agent file path');
   const openAgentFileLabel = t('sessions.openAgentFile', 'Open agent file');
+  const canvasLabel = t('sessions.diagram.canvas', 'Zoom and pan diagram');
   const openDiagramLabel = t('sessions.diagramViewer.open', 'Open diagram');
-  const [diagramSelection, setDiagramSelection] = useState<MermaidDiagramSelection | null>(null);
-  const hasMermaidBlock = useMemo(() => MERMAID_FENCE_PATTERN.test(text), [text]);
+  // Both scans below re-run over the whole accumulated answer on every streamed
+  // delta. A substring test settles the common case before the line-anchored
+  // pattern runs.
+  const hasMermaidBlock = useMemo(
+    () => text.includes('mermaid') && MERMAID_FENCE_PATTERN.test(text),
+    [text]
+  );
   const normalizedText = useMemo(() => normalizeTexMathDelimiters(text), [text]);
+  const {
+    blocks: mermaidBlocks,
+    selection: diagramSelection,
+    closeDiagram,
+    openDiagram,
+    handleContainerClick,
+    handleContainerKeyDown,
+  } = useMermaidDiagramCanvas({
+    containerRef,
+    enabled: hasMermaidBlock,
+    canvasLabel,
+  });
 
-  const closeDiagram = useCallback(() => setDiagramSelection(null), []);
-
-  const openDiagram = useCallback((diagram: Element) => {
-    const svg = diagram.querySelector('svg');
-    if (!svg) {
-      return;
-    }
-    // The rendered size of the copy in the message is the diagram's natural
-    // size, and the viewer's opening zoom is expressed against it.
-    const rect = svg.getBoundingClientRect();
-    setDiagramSelection({
-      svg: svg.cloneNode(true) as SVGSVGElement,
-      naturalWidth: rect.width,
-      naturalHeight: rect.height,
-    });
-  }, []);
-
-  const handleMarkdownClick = useCallback(
-    (event: ReactMouseEvent<HTMLDivElement>) => {
-      if (!(event.target instanceof Element)) {
-        return;
-      }
-      const diagram = event.target.closest(MERMAID_DIAGRAM_SELECTOR);
-      if (!diagram) {
-        return;
-      }
-      // Releasing a text selection over a diagram label is not a request to
-      // open it.
-      if (window.getSelection()?.toString()) {
-        return;
-      }
-      openDiagram(diagram);
-    },
-    [openDiagram]
-  );
-
-  const handleMarkdownKeyDown = useCallback(
-    (event: ReactKeyboardEvent<HTMLDivElement>) => {
-      if (event.key !== 'Enter' && event.key !== ' ') {
-        return;
-      }
-      if (!(event.target instanceof Element)) {
-        return;
-      }
-      const diagram = event.target.closest(MERMAID_DIAGRAM_SELECTOR);
-      if (!diagram) {
-        return;
-      }
-      event.preventDefault();
-      openDiagram(diagram);
-    },
-    [openDiagram]
-  );
-
-  // Streamdown owns the diagram markup, so the affordance that replaces its
-  // removed full-screen button is applied to that markup here. A diagram
-  // appears only after the lazily imported Mermaid runtime resolves — long
-  // after this component commits — so a one-shot pass would miss it; the
-  // observer is installed only for text that actually fences a diagram.
-  useEffect(() => {
-    const root = containerRef.current;
-    if (!root) {
-      return undefined;
-    }
-
-    const markedDiagrams = new Map<
-      HTMLElement,
-      { role: string | null; tabIndex: string | null; ariaLabel: string | null }
-    >();
-    const clearMarkedDiagrams = () => {
-      for (const [diagram, attributes] of markedDiagrams) {
-        if (attributes.role == null) {
-          diagram.removeAttribute('role');
-        } else {
-          diagram.setAttribute('role', attributes.role);
-        }
-        if (attributes.tabIndex == null) {
-          diagram.removeAttribute('tabindex');
-        } else {
-          diagram.setAttribute('tabindex', attributes.tabIndex);
-        }
-        if (attributes.ariaLabel == null) {
-          diagram.removeAttribute('aria-label');
-        } else {
-          diagram.setAttribute('aria-label', attributes.ariaLabel);
-        }
-      }
-      markedDiagrams.clear();
-    };
-    if (!hasMermaidBlock) {
-      clearMarkedDiagrams();
-      return undefined;
-    }
-
-    const markDiagramsOpenable = () => {
-      clearMarkedDiagrams();
-      root.querySelectorAll<HTMLElement>(MERMAID_DIAGRAM_SELECTOR).forEach((diagram) => {
-        markedDiagrams.set(diagram, {
-          role: diagram.getAttribute('role'),
-          tabIndex: diagram.getAttribute('tabindex'),
-          ariaLabel: diagram.getAttribute('aria-label'),
-        });
-        diagram.setAttribute('role', 'button');
-        diagram.setAttribute('tabindex', '0');
-        diagram.setAttribute('aria-label', openDiagramLabel);
-      });
-    };
-
-    markDiagramsOpenable();
-    const observer = new MutationObserver(markDiagramsOpenable);
-    observer.observe(root, { childList: true, subtree: true });
-    return () => {
-      observer.disconnect();
-      clearMarkedDiagrams();
-    };
-  }, [hasMermaidBlock, openDiagramLabel]);
   const components = useMemo(
     () =>
       createMarkdownComponents({
         copyAgentFileLabel,
         openAgentFileLabel,
         onAgentFileLinkClick,
+        getAgentFileLinkContextMenuItems,
+        readonly: readonly !== null,
       }),
-    [copyAgentFileLabel, onAgentFileLinkClick, openAgentFileLabel]
+    [
+      copyAgentFileLabel,
+      getAgentFileLinkContextMenuItems,
+      onAgentFileLinkClick,
+      openAgentFileLabel,
+      readonly,
+    ]
   );
 
   const rehypePlugins = useMemo(() => (allowHtml ? [rehypeRaw, rehypeSanitize] : []), [allowHtml]);
@@ -1274,6 +1335,11 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
       .forEach((button) => button.setAttribute('aria-label', copyCodeLabel));
 
     const clearSearchHighlights = () => {
+      // Nothing was ever marked in this block, so there is nothing to unwrap.
+      // This effect re-runs on every streamed delta, and the query below walks
+      // the rendered subtree.
+      if (!markedRef.current) return;
+      markedRef.current = false;
       const existingMarks = root.querySelectorAll('mark[data-session-search-mark="true"]');
       existingMarks.forEach((mark) => {
         const parent = mark.parentNode;
@@ -1387,6 +1453,7 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
       if (!parent) {
         return;
       }
+      markedRef.current = true;
       parent.insertBefore(fragment, node);
       parent.removeChild(node);
     });
@@ -1401,8 +1468,8 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
         data-search-block-id={searchBlockId}
         className={cn(MARKDOWN_BASE_CLASSNAME, MARKDOWN_SIZE_CLASSNAME, className)}
         style={markdownFontSizeStyle(normalizedSize)}
-        onClick={handleMarkdownClick}
-        onKeyDown={handleMarkdownKeyDown}
+        onClick={handleContainerClick}
+        onKeyDown={handleContainerKeyDown}
       >
         <Streamdown
           // Streamdown's memo comparator does not include every rendering prop;
@@ -1424,6 +1491,20 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
         >
           {normalizedText}
         </Streamdown>
+        {/* Streamdown's own action bar, filled by portal: its full-screen
+            control is off (its overlay is unusable on touch), and this one
+            opens `MermaidDiagramViewer` from the same always-visible row as
+            copy and download. */}
+        {mermaidBlocks.map((block) =>
+          createPortal(
+            <MermaidFullscreenButton
+              label={openDiagramLabel}
+              onOpen={() => openDiagram(block.diagram)}
+            />,
+            block.actions,
+            block.id
+          )
+        )}
       </div>
       {/* A sibling of the markdown, not a child: a portal's events bubble
           through the React tree, and inside the container the viewer's own

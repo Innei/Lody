@@ -7,6 +7,8 @@ import {
 } from '@agentclientprotocol/sdk';
 import type { ToolCallContent as AcpToolCallContent, SessionMode } from '@agentclientprotocol/sdk';
 import type { PermissionOutcome } from './message';
+import type { SessionGoalAction } from './goal';
+import { createPlanModeConfigOption } from 'acp-extension-core';
 import type { AgentConfigId, AgentRoleId, McpServerId, SessionId } from './ids';
 import type { MessageTextSpan } from './message-text-spans';
 import type { MinimalVisualAnnotationAnchor } from './visual-annotation-types';
@@ -21,6 +23,7 @@ export const MANAGED_BUILTIN_RUNTIMES = [
   { runtimeName: 'grok-build', agentType: 'grok', displayName: 'Grok' },
   { runtimeName: 'claude-code', agentType: 'claude', displayName: 'Claude Code' },
   { runtimeName: 'codex', agentType: 'codex', displayName: 'Codex' },
+  { runtimeName: 'pi', agentType: 'pi', displayName: 'Pi' },
 ] as const;
 
 export type ManagedBuiltinRuntime = (typeof MANAGED_BUILTIN_RUNTIMES)[number];
@@ -33,6 +36,7 @@ export type CliType = BuiltinCliType;
 export const BUILTIN_AGENTS = [
   ...MANAGED_BUILTIN_RUNTIMES.map(({ agentType, displayName }) => ({ agentType, displayName })),
   { agentType: 'deepseek', displayName: 'DeepSeek Harness' },
+  { agentType: 'bub', displayName: 'Bub' },
 ] as const;
 
 export type BuiltinAgent = (typeof BUILTIN_AGENTS)[number];
@@ -40,11 +44,76 @@ export type BuiltinAgentType = BuiltinAgent['agentType'];
 export type AgentConfigCliType = 'builtin' | 'registry' | 'custom';
 export type AgentType = string;
 
-/** Builtin ACP adapters that publish their own session titles. */
-export const usesAcpProvidedSessionTitle = (
+/**
+ * How each builtin agent's ACP adapter handles the session title.
+ *
+ * - `none` — no usable title over ACP, so Lody runs its isolated title agent and
+ *   keeps the title-generation config for it. Kimi's pushed title is only the
+ *   first prompt truncated to 200 chars; the Harness never mounts its upstream
+ *   title plugin.
+ * - `untagged` — pushes one authoritative `session_info_update` carrying no
+ *   `_meta`, so it can only be trusted on identity. Claude asks the Agent SDK via
+ *   its `generate_session_title` control request; Grok's official runtime
+ *   generates one in its own ACP session impl and the proxy forwards it untouched.
+ * - `tagged` — labels every title with `_meta.lody.titleSource`, so only an
+ *   `explicit` one may be stored. Codex (>= 1.8.0) emits a first-prompt `fallback`
+ *   preview before its generated title, and storing that would make the raw prompt
+ *   the session title.
+ *
+ * Exhaustive on purpose: adding a builtin agent must not silently default it.
+ */
+const BUILTIN_ACP_TITLE_OWNERSHIP: Record<BuiltinAgentType, 'none' | 'untagged' | 'tagged'> = {
+  pi: 'none',
+  claude: 'untagged',
+  codex: 'tagged',
+  grok: 'untagged',
+  kimi: 'none',
+  deepseek: 'none',
+  // Bub's ACP server does not push an authoritative session title, so Lody
+  // keeps running its isolated title agent.
+  bub: 'none',
+};
+
+const builtinAcpTitleOwnership = (
   cliType: AgentConfigCliType | null | undefined,
   agentType: AgentType | null | undefined
-): boolean => cliType === 'builtin' && agentType === 'claude';
+): 'none' | 'untagged' | 'tagged' =>
+  cliType === 'builtin' && agentType && isBuiltinAgentType(agentType)
+    ? BUILTIN_ACP_TITLE_OWNERSHIP[agentType]
+    : 'none';
+
+/**
+ * Builtin ACP adapters that generate their own session titles, so Lody never
+ * starts its isolated title agent for them and hides the title-generation config
+ * from their agent settings.
+ *
+ * A runtime override revokes this. The table describes the managed runtime each
+ * agent normally launches, but `BuiltinRuntimeOverrides` can point the same
+ * `agentType` at any executable — including one predating the title behaviour.
+ * Such a session would otherwise get no title at all: the isolated generator is
+ * skipped, no title arrives over ACP, and the settings that would fix it are
+ * hidden. Keeping the local generator for overridden runtimes is the conservative
+ * side to be wrong on, and it costs only the duplicate work this change removed
+ * for the managed case.
+ */
+export const acpOwnsSessionTitleGeneration = (
+  cliType: AgentConfigCliType | null | undefined,
+  agentType: AgentType | null | undefined,
+  runtimeOverrides?: BuiltinRuntimeOverrides
+): boolean =>
+  !hasBuiltinRuntimeOverrideValues(runtimeOverrides) &&
+  builtinAcpTitleOwnership(cliType, agentType) !== 'none';
+
+/**
+ * Adapters whose pushed titles are authoritative without a `titleSource` tag.
+ *
+ * Deliberately narrower than {@link acpOwnsSessionTitleGeneration}, and narrower
+ * by construction rather than by a second list kept in sync by hand.
+ */
+export const trustsUntaggedAcpSessionTitle = (
+  cliType: AgentConfigCliType | null | undefined,
+  agentType: AgentType | null | undefined
+): boolean => builtinAcpTitleOwnership(cliType, agentType) === 'untagged';
 
 /**
  * User-defined ACP launch spec for `cliType: 'custom'` providers: the exact
@@ -281,7 +350,7 @@ export type AcpCommandSummary = {
 // Codex-only carry a bogus ladder for every agent that spells other variants
 // with the same brackets — a Claude probe stored `{ opus: ['1m'] }` — and the
 // per-model effort picker would rebuild that model's ladder from it.
-export const ACP_CAPABILITY_CACHE_VERSION = 7;
+export const ACP_CAPABILITY_CACHE_VERSION = 8;
 
 export type AcpCapabilityAuthority = 'unavailable' | 'provisional' | 'authoritative';
 
@@ -315,6 +384,12 @@ export type AcpCapabilityCacheEntry = {
   sessionFork?: boolean;
   /** True only when the runtime advertised Lody's acknowledged steering extension. */
   acknowledgedSteer?: boolean;
+  /**
+   * Goal actions the runtime advertised, on any transport. Absent means the
+   * runtime has no goal extension, which is what keeps the goal controls hidden
+   * instead of guessing from the agent's name.
+   */
+  goalActions?: SessionGoalAction[];
   /** True when this Lody machine supports durable asynchronous forks into a new worktree. */
   sessionForkWorktree?: boolean;
   fetchedAt: number;
@@ -422,6 +497,14 @@ export const isManagedBuiltinAgentType = (
 ): agentType is ManagedBuiltinAgentType =>
   MANAGED_BUILTIN_RUNTIMES.some((runtime) => runtime.agentType === agentType);
 
+/**
+ * Builtins that may be created through the durable provider-setup queue.
+ * Managed runtimes use it for download + verification; Bub uses the same queue
+ * only to keep its user-installed command unpublished until a live probe passes.
+ */
+export const supportsBuiltinProviderSetup = (agentType: string): agentType is BuiltinAgentType =>
+  isManagedBuiltinAgentType(agentType) || agentType === 'bub';
+
 export const getManagedBuiltinRuntimeByAgentType = (
   agentType: string
 ): ManagedBuiltinRuntime | undefined =>
@@ -443,13 +526,15 @@ export type StaticBuiltinAcpCapabilities = {
 /** Codex mode that routes approval requests to a model reviewer subagent. */
 export const CODEX_AUTO_REVIEW_MODE_ID = 'agent-auto-review';
 
-const BUILTIN_DEFAULT_MODE_IDS: Record<BuiltinAgentType, string> = {
+const BUILTIN_DEFAULT_MODE_IDS = {
   kimi: 'auto',
-  grok: 'agent',
+  // Grok advertises `default` / `plan`, not Codex `agent`. Injecting `agent`
+  // makes Role/MCP session create fail with "Unsupported ACP mode".
+  grok: 'default',
   claude: 'auto',
   codex: CODEX_AUTO_REVIEW_MODE_ID,
   deepseek: 'workspace-write',
-};
+} as const satisfies Partial<Record<BuiltinAgentType, string>>;
 
 /**
  * Lody-owned mode default for builtin agents when a turn has no
@@ -461,10 +546,11 @@ export const getBuiltinDefaultModeId = (
   agentType: AgentType | null | undefined
 ): string | undefined =>
   cliType === 'builtin' && agentType && isBuiltinAgentType(agentType)
-    ? BUILTIN_DEFAULT_MODE_IDS[agentType]
+    ? BUILTIN_DEFAULT_MODE_IDS[agentType as keyof typeof BUILTIN_DEFAULT_MODE_IDS]
     : undefined;
 
 const DEEPSEEK_HARNESS_CONFIG_OPTIONS: AcpConfigOptionSummary[] = [
+  { ...createPlanModeConfigOption(false), options: [] },
   {
     id: 'mode',
     name: 'Permission',
@@ -600,20 +686,8 @@ const CODEX_STATIC_CONFIG_OPTIONS: AcpConfigOptionSummary[] = [
     options: [],
   },
   {
-    id: 'collaboration_mode',
-    name: 'Collaboration mode',
-    description: 'How Codex collaborates for subsequent turns',
-    category: 'collaboration_mode',
-    type: 'select',
-    currentValue: 'default',
-    options: [
-      { value: 'default', name: 'Default' },
-      {
-        value: 'plan',
-        name: 'Plan',
-        description: 'Plan before making changes',
-      },
-    ],
+    ...createPlanModeConfigOption(false),
+    options: [],
   },
 ];
 
@@ -826,17 +900,18 @@ const KIMI_STATIC_MODES: StaticBuiltinAcpCapabilities['modes'] = [
 
 const KIMI_STATIC_CONFIG_OPTIONS: AcpConfigOptionSummary[] = [
   {
-    id: 'mode',
-    name: 'Mode',
-    category: 'mode',
+    id: 'permission_mode',
+    name: 'Permission',
+    category: '_permission',
     type: 'select',
     currentValue: BUILTIN_DEFAULT_MODE_IDS.kimi,
-    options: KIMI_STATIC_MODES.map((mode) => ({
+    options: KIMI_STATIC_MODES.filter((mode) => mode.id !== 'plan').map((mode) => ({
       value: mode.id,
       name: mode.name,
       description: mode.description ?? undefined,
     })),
   },
+  { ...createPlanModeConfigOption(false), options: [] },
 ];
 
 const GROK_STATIC_MODES: StaticBuiltinAcpCapabilities['modes'] = [
@@ -865,22 +940,7 @@ const GROK_STATIC_MODELS: StaticBuiltinAcpCapabilities['models'] = [
 ];
 
 const GROK_STATIC_CONFIG_OPTIONS: AcpConfigOptionSummary[] = [
-  {
-    id: 'interaction_mode',
-    name: 'Interaction Mode',
-    description: 'Controls whether the agent acts, plans, or answers read-only questions',
-    category: 'mode',
-    type: 'select',
-    currentValue: BUILTIN_DEFAULT_MODE_IDS.grok,
-    options: [
-      { value: 'agent', name: 'Agent', description: 'Use tools and make changes when needed' },
-      {
-        value: 'plan',
-        name: 'Plan',
-        description: 'Plan and reason without modifying the workspace',
-      },
-    ],
-  },
+  { ...createPlanModeConfigOption(false), options: [] },
   {
     id: 'permission_mode',
     name: 'Permission Mode',
@@ -893,11 +953,6 @@ const GROK_STATIC_CONFIG_OPTIONS: AcpConfigOptionSummary[] = [
         value: 'ask',
         name: 'Ask Every Time',
         description: 'Request approval before protected actions',
-      },
-      {
-        value: 'auto',
-        name: 'Auto',
-        description: 'Let Grok decide when approval is required (experimental)',
       },
       {
         value: 'always-approve',
@@ -935,7 +990,9 @@ const GROK_STATIC_CONFIG_OPTIONS: AcpConfigOptionSummary[] = [
   },
 ];
 
-const STATIC_BUILTIN_ACP_CAPABILITIES: Record<BuiltinAgentType, StaticBuiltinAcpCapabilities> = {
+const STATIC_BUILTIN_ACP_CAPABILITIES: Partial<
+  Record<BuiltinAgentType, StaticBuiltinAcpCapabilities>
+> = {
   claude: {
     modes: CLAUDE_STATIC_MODES,
     models: CLAUDE_STATIC_MODELS,
@@ -1008,7 +1065,8 @@ export const getStaticBuiltinAcpCapabilities = (
   if (hasBuiltinRuntimeOverrideValues(runtimeOverrides)) {
     return undefined;
   }
-  return cloneStaticCapabilities(STATIC_BUILTIN_ACP_CAPABILITIES[agentType]);
+  const capabilities = STATIC_BUILTIN_ACP_CAPABILITIES[agentType];
+  return capabilities ? cloneStaticCapabilities(capabilities) : undefined;
 };
 
 /**
@@ -1220,10 +1278,8 @@ export type MessageItemActor = {
 };
 
 /**
- * Metadata for the task_proposal system notice: an agent suggesting that work
- * be recorded as a task. The notice stays in history unresolved, so a proposal
- * ignored today can still be confirmed days later — unlike a dialog, which
- * would vanish while the session ran unattended.
+ * Leftover metadata for stored `task_proposal` system notices. The Tasks
+ * product is gone; this shape exists only so existing history still parses.
  */
 export type TaskProposalMeta = {
   /** Stable id so repeated proposals of the same work do not stack up. */
@@ -1504,6 +1560,7 @@ export type MessageContent =
   | SessionGoalContent
   | {
       type: 'tool_call';
+      _meta?: { [k: string]: unknown } | null;
       toolCallId: string;
       title?: string | null;
       status: ToolCallStatus;
@@ -1552,10 +1609,12 @@ export type MessageContent =
       commands: AvailableCommand[];
     }
   | {
-      type: 'system_notice';
-      name: SystemNoticeName;
-      meta?: SystemNoticeMeta[SystemNoticeName];
-    }
+      [Name in SystemNoticeName]: {
+        type: 'system_notice';
+        name: Name;
+        meta?: SystemNoticeMeta[Name];
+      };
+    }[SystemNoticeName]
   | OperationCompletionContent
   | OperationProgressContent
   | {
@@ -1641,8 +1700,6 @@ export type ACPSessionConfig = {
   configOptionValues?: Record<string, AcpConfigOptionValue>;
   /** Workspace MCP catalog ids selected for this session. */
   mcpServerIds?: McpServerId[];
-  /** Whether the built-in Lody Task MCP tools are available to this Turn's Agent session. */
-  taskToolsEnabled?: boolean;
   /**
    * Agent Role identity selected in the composer for this Turn. Null is an
    * explicit None selection; absence is legacy/unknown. This is provenance for
@@ -1663,5 +1720,8 @@ export type ACPSessionConfig = {
  * Persisted per-user-turn dispatch config.
  * Keep this looser than `ACPSessionConfig` so older docs and partial writes remain readable.
  */
-export type SessionTurnInputConfig = Partial<ACPSessionConfig>;
+export type SessionTurnInputConfig = Partial<ACPSessionConfig> & {
+  /** An accepted steer has no independently editable provider turn boundary. */
+  _lodyDeliveryKind?: import('./message-schemas').SessionHistoryDeliveryKind;
+};
 import type { OperationCompletionContent, OperationProgressContent } from './session-orchestration';

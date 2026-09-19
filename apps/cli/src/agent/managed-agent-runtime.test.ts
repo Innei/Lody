@@ -27,6 +27,7 @@ import {
   KIMI_CODE_VERSION,
   formatManagedRuntimeFailureMessage,
   isNodeVersionAtLeast,
+  getHostMachineProtocolCapabilities,
   mapManagedRuntimePlatform,
   ManagedAgentRuntimeManager,
   ManagedRuntimeIncompatibleHostError,
@@ -35,6 +36,24 @@ import {
   type FetchImpl,
   type ManagedRuntimeProgressEvent,
 } from './managed-agent-runtime';
+
+describe('host runtime capabilities', () => {
+  it.each([
+    ['22.14.0', 'darwin', 'arm64', undefined],
+    ['22.18.0', 'linux', 'x64', undefined],
+    ['22.19.0', 'darwin', 'arm64', 1],
+    ['23.6.0', 'win32', 'x64', 1],
+    ['24.0.0', 'freebsd', 'x64', undefined],
+    ['24.0.0', 'linux', 'ia32', undefined],
+  ] as const)(
+    'advertises Pi only on compatible host %s %s %s',
+    (node, platform, arch, expected) => {
+      const capabilities = getHostMachineProtocolCapabilities(node, platform, arch);
+      expect(capabilities.builtinPi).toBe(expected);
+      expect(capabilities.providerSetup).toBe(1);
+    }
+  );
+});
 
 async function sha256(bytes: Uint8Array): Promise<string> {
   return createHash('sha256').update(bytes).digest('hex');
@@ -293,9 +312,9 @@ describe('ManagedAgentRuntimeManager', () => {
     expect(mapManagedRuntimePlatform('kimi-code', 'win32', 'x64')).toBe('node');
   });
 
-  it('pins Grok 1.0.13 for every supported native platform', () => {
+  it('pins Grok 1.0.34 for every supported native platform', () => {
     expect(GROK_BUILD_RUNTIME_VERSION).toBe(grokRuntimeManifest.officialRuntime.version);
-    expect(grokRuntimeManifest.officialRuntime.minimumSupportedVersion).toBe('1.0.13');
+    expect(grokRuntimeManifest.officialRuntime.minimumSupportedVersion).toBe('1.0.34');
     expect(mapManagedRuntimePlatform('grok-build', 'darwin', 'arm64')).toBe('darwin-arm64');
     expect(mapManagedRuntimePlatform('grok-build', 'linux', 'x64')).toBe('linux-x64');
     expect(mapManagedRuntimePlatform('grok-build', 'win32', 'arm64')).toBe('win32-arm64');

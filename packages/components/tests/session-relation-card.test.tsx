@@ -81,6 +81,22 @@ describe('Session relation cards', () => {
     expect(onOpen).toHaveBeenCalledWith(openerSessionId);
   });
 
+  it('shows dangling provenance without a navigation action', async () => {
+    await act(async () => {
+      root.render(
+        <SessionRelationCard
+          relation="opened-by"
+          label="This session was automatically created by"
+          sessionTitle="Deleted session"
+          actionLabel="Back to session"
+        />
+      );
+    });
+
+    expect(container.textContent).toContain('Deleted session');
+    expect(container.querySelector<HTMLButtonElement>('button')?.disabled).toBe(true);
+  });
+
   it('turns a successful session_create completion into a live Session card', async () => {
     const store = createStore();
     store.set(setDocMetaByRoomIdAtom, getSessionRoomId(createdSessionId), {
@@ -108,6 +124,69 @@ describe('Session relation cards', () => {
     expect(container.textContent).toContain('Generated child conversation title');
     expect(container.textContent).not.toContain('Fallback operation label');
 
+    await act(async () => {
+      Array.from(container.querySelectorAll<HTMLButtonElement>('button'))
+        .find((button) => button.textContent?.includes('View session'))
+        ?.click();
+    });
+    expect(onNavigateSession).toHaveBeenCalledWith({ sessionId: createdSessionId });
+  });
+
+  it('shows the reply a message Operation received, instead of its id and counts', async () => {
+    const store = createStore();
+    store.set(setDocMetaByRoomIdAtom, getSessionRoomId(createdSessionId), {
+      id: createdSessionId,
+      machineId: 'machine-1',
+      userId: 'user-1',
+      createdAt: '2026-08-14T12:00:00.000Z',
+      title: 'Portal selection regression',
+    });
+    const onNavigateSession = vi.fn();
+    const chatCompletion: SessionHistoryParsed = {
+      ...completionMessage,
+      items: [
+        {
+          type: 'operation_completion',
+          deliveryId: 'operation:pr789:completion',
+          operationId: 'pr789-fix-regression-test-portal-selection-20260917',
+          operationKind: 'session_chat',
+          completion: {
+            type: 'result',
+            value: {
+              items: [
+                {
+                  status: 'succeeded',
+                  target: { sessionId: createdSessionId, userTurnId: 'user-turn' },
+                  assistantTurnId: 'assistant-turn',
+                  output: { text: 'Fixed the portal\n\nselection test; CI is green.' },
+                },
+              ],
+            },
+          },
+        },
+      ],
+    };
+
+    await act(async () => {
+      root.render(
+        <Provider store={store}>
+          <MessageRowView
+            message={chatCompletion}
+            sessionId={openerSessionId}
+            onNavigateSession={onNavigateSession}
+          />
+        </Provider>
+      );
+    });
+
+    const text = container.textContent ?? '';
+    expect(text).toContain('Reply received');
+    expect(text).toContain('Portal selection regression');
+    // The card carries the reply's opening only; the rest lives in the dialog.
+    expect(text).toContain('Fixed the portal');
+    expect(text).not.toContain('CI is green');
+    expect(text).not.toContain('pr789-fix-regression-test-portal-selection-20260917');
+    expect(text).not.toMatch(/items ·/);
     await act(async () => {
       Array.from(container.querySelectorAll<HTMLButtonElement>('button'))
         .find((button) => button.textContent?.includes('View session'))
@@ -223,5 +302,61 @@ describe('Session relation cards', () => {
     );
     expect(container.querySelector('[data-session-relation-card="opened"]')).toBeNull();
     expect(container.textContent).not.toBe('');
+  });
+
+  it('keeps a long reply to its opening line and shows all of it in a dialog', async () => {
+    const opening =
+      'I will first read the failing Tests log and re-check the portal selection logic.';
+    const middle = Array.from({ length: 6 }, (_, i) => `Detail paragraph ${i + 1}.`).join('\n\n');
+    const conclusion = 'Conclusion: the portal test now waits for mount, and CI is green.';
+    const reply = `${opening}\n\n${middle}\n\n${conclusion}`;
+    await act(async () => {
+      root.render(
+        <Provider store={createStore()}>
+          <MessageRowView
+            message={{
+              ...completionMessage,
+              items: [
+                {
+                  type: 'operation_completion',
+                  deliveryId: 'operation:long:completion',
+                  operationId: 'long-reply',
+                  operationKind: 'session_chat',
+                  completion: {
+                    type: 'result',
+                    value: {
+                      items: [
+                        {
+                          status: 'succeeded',
+                          target: { sessionId: createdSessionId, userTurnId: 'user-turn' },
+                          assistantTurnId: 'assistant-turn',
+                          output: { text: reply },
+                        },
+                      ],
+                    },
+                  },
+                },
+              ],
+            }}
+            sessionId={openerSessionId}
+          />
+        </Provider>
+      );
+    });
+
+    const card = container.querySelector('[data-operation-reply-card="succeeded"]');
+    expect(card?.textContent).toContain(opening);
+    expect(card?.textContent).not.toContain('Detail paragraph');
+    expect(card?.textContent).not.toContain(conclusion);
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+
+    await act(async () =>
+      Array.from(card?.querySelectorAll<HTMLButtonElement>('button') ?? [])
+        .find((button) => button.textContent === opening)
+        ?.click()
+    );
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog?.textContent).toContain('Detail paragraph 6.');
+    expect(dialog?.textContent).toContain(conclusion);
   });
 });

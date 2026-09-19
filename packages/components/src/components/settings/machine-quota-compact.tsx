@@ -7,7 +7,8 @@ import {
   parseRateLimitEntryKey,
 } from '@lody/shared';
 import { formatDistanceToNow, type Locale } from 'date-fns';
-import { enUS, zhCN } from 'date-fns/locale';
+import { enUS } from 'date-fns/locale/en-US';
+import { zhCN } from 'date-fns/locale/zh-CN';
 import { AnthropicIcon } from '@/components/icons/anthropic-icon';
 import { OpenAIIcon } from '@/components/icons/openai-icon';
 import { Badge } from '@/ui/badge';
@@ -152,7 +153,7 @@ export function MachineQuotaCompact({ raceLimits, filterCliType }: MachineQuotaC
             className="rounded-lg border border-border/70 bg-background/80 px-2.5 py-2"
           >
             <div className="mb-2 flex min-w-0 flex-wrap items-center justify-between gap-2">
-              <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-foreground">
+              <span className="inline-flex items-center gap-1.5 text-xs font-normal text-foreground">
                 {cliIcon}
                 {cliTypeLabel}
               </span>
@@ -190,7 +191,7 @@ function UsageQuotaWindow({
   return (
     <div className="min-w-0" title={`${fullLabel}: ${percentText}, ${resetText}`}>
       <div className="flex items-baseline justify-between gap-2">
-        <span className="text-[11px] font-medium text-muted-foreground">{shortLabel}</span>
+        <span className="text-[11px] font-normal text-muted-foreground">{shortLabel}</span>
         <span className="font-mono text-[11px] text-foreground">{percentText}</span>
       </div>
       <div className="mt-1">

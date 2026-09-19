@@ -8,12 +8,27 @@ import dns from 'node:dns'
 import { writeHeapSnapshot } from 'node:v8'
 import icon from '../../resources/icon.png?asset'
 import macIcon from '../../build/icon-mac.padded.png?asset'
-import { acquireSingleInstanceLock, registerOpenUrlHandler } from './deep-link'
+import {
+  acquireSingleInstanceLock,
+  initializeAuthDeepLinks,
+  registerOpenUrlHandler
+} from './deep-link'
 import { registerLodyProtocolClient } from './protocol-client'
 import { registerIpcServices } from './ipc/register-services'
-import { openMainWindow, openOrFocusMainWindow, setMainWindowProductReloadTarget } from './window'
-import { getMainWindow, setAppQuitting, setWindowsTrayAvailable } from './window-state'
+import {
+  openMainWindow,
+  openOrFocusMainWindow,
+  reloadMainWindowForDevbar,
+  setMainWindowProductReloadTarget
+} from './window'
+import {
+  getMainWindow,
+  productWindows,
+  setAppQuitting,
+  setWindowsTrayAvailable
+} from './window-state'
 import { CliService } from './services/cli-service'
+import { applyPendingDesktopLocalReset } from './services/local-reset-service'
 import { TerminalRelay } from './services/terminal-relay'
 import { LoroDataPlaneRelay } from './services/loro-data-plane-relay'
 import { NotificationService } from './services/notification-service'
@@ -21,7 +36,11 @@ import { AuthService } from './services/auth-service'
 import { authClient } from './auth'
 import { AppUpdaterService } from './services/app-updater-service'
 import { shouldConstructUpdaterEnabled } from './services/app-updater-sparkle-policy'
-import { configureDevbarDiagnostics } from './services/devbar-service'
+import {
+  configureDevbarDiagnostics,
+  startDevbarDevframeService,
+  stopDevbarDevframeService
+} from './services/devbar/service'
 import { GlobalShortcutsService } from './services/global-shortcuts-service'
 import { WindowsTrayService } from './services/windows-tray-service'
 import {
@@ -185,8 +204,13 @@ if (hasSingleInstanceLock) {
 
 if (hasSingleInstanceLock) {
   recordE2EBootDiagnostic('waiting-for-app-ready')
-  const appReady = app.whenReady().then(() => {
+  const appReady = app.whenReady().then(async () => {
     installLocalFileResourceProtocol()
+    // Before any window can reopen the local stores: a reset armed with
+    // `lody app reset-cache` is the way back for a user whose renderer is wedged,
+    // so it has to run while nothing holds that storage open.
+    await applyPendingDesktopLocalReset()
+    await startDevbarDevframeService()
     recordE2EBootDiagnostic('initializing-services')
     if (process.platform === 'darwin' && !app.isPackaged) app.dock?.setIcon(macIcon)
 
@@ -194,12 +218,39 @@ if (hasSingleInstanceLock) {
       isDefaultProtocolClient: app.isDefaultProtocolClient(LODY_PROTOCOL),
       protocol: LODY_PROTOCOL
     })
-    const authService = new AuthService()
+    const authService = new AuthService(
+      (state) => {
+        // Only redacted lifecycle data goes to diagnostics, never the session.
+        console.info('[Auth] login transition', {
+          attemptId: state.attemptId,
+          phase: state.phase,
+          error: state.error
+        })
+        for (const window of productWindows) {
+          if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+            try {
+              window.webContents.send('auth.loginState', state)
+            } catch {
+              // A closing renderer cannot roll back the authoritative result.
+              console.warn('[Auth] Login state delivery failed; snapshot remains available')
+            }
+          }
+        }
+      },
+      () => {
+        void cliService.restartAutoStart().catch(() => console.warn('[Auth] CLI restart failed'))
+      }
+    )
     const cliService = new CliService({
       resolveBootstrapSession: async () => {
         return await authService.getBootstrapSession()
       }
     })
+    if (!isLocalPlatform()) {
+      initializeAuthDeepLinks(async (token) => {
+        await authService.login.complete(token)
+      })
+    }
     const terminalRelay = new TerminalRelay(getLocalTerminalSocketPath(mainPlatformKind))
     const loroDataPlaneRelay = new LoroDataPlaneRelay(
       getLocalLoroDataPlaneSocketPath(mainPlatformKind)
@@ -268,7 +319,8 @@ if (hasSingleInstanceLock) {
       windowBadgeService,
       globalShortcutsService,
       getMainWindow,
-      completeOnboarding
+      completeOnboarding,
+      reloadMainWindowForDevbar
     })
 
     setupApplicationMenu({
@@ -328,7 +380,8 @@ if (hasSingleInstanceLock) {
       event.preventDefault()
       void Promise.allSettled([
         cliService.shutdownForQuit(),
-        flushElectronMainErrorReporting()
+        flushElectronMainErrorReporting(),
+        stopDevbarDevframeService()
       ]).finally(() => {
         cliShutdownComplete = true
         app.quit()

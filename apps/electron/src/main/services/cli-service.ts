@@ -271,6 +271,9 @@ function buildCliRuntimeEnvOverrides(): NodeJS.ProcessEnv {
   assignEnvIfPresent(env, 'LODY_AUTH_URL', import.meta.env.VITE_CONVEX_DEPLOY_URL)
   assignEnvIfPresent(env, 'LODY_AUTH_SITE_URL', import.meta.env.VITE_CONVEX_SITE_URL)
   assignEnvIfPresent(env, 'LODY_SERVER_URL', import.meta.env.VITE_SERVER_URL)
+  // Always shadow any inherited value: an unset bundled gateway must fall back to
+  // LODY_SERVER_URL in the CLI, never to a user-provided control origin.
+  env.LODY_PREVIEW_GATEWAY_URL = import.meta.env.VITE_PREVIEW_GATEWAY_URL?.trim() ?? ''
   assignEnvIfPresent(env, 'SITE_URL', import.meta.env.VITE_SITE_URL)
 
   return env
@@ -664,12 +667,10 @@ export class CliService {
         this.localControlClient
           .sessionControl(message, { timeoutMs, onResponse: options.onResponse })
           .pipe(
-            Effect.map(
-              (responses): SendLocalSessionControlResult => ({
-                ok: true,
-                responses
-              })
-            ),
+            Effect.map((responses): SendLocalSessionControlResult => ({
+              ok: true,
+              responses
+            })),
             Effect.catchTag('IpcTimeoutError', () =>
               Effect.succeed({ ok: false as const, error: 'request_timeout' })
             ),

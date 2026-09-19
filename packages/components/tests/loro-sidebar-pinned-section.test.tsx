@@ -70,10 +70,90 @@ describe('LoroSidebar pinned section', () => {
     });
   }
 
+  it('offers workspace context actions without switching the selected workspace', () => {
+    const previous = window.__LODY_ELECTRON__;
+    window.__LODY_ELECTRON__ = true;
+    try {
+      let selected = 'workspace';
+      renderSidebar({
+        workspaces: [
+          { id: 'workspace', name: 'Lody', slug: 'lody' },
+          { id: 'second', name: 'Second workspace', slug: 'second' },
+        ],
+        onWorkspaceSelected: (value) => {
+          selected = value;
+        },
+      });
+      const trigger = container?.querySelector('[data-workspace-switcher-trigger]');
+      flushSync(() => {
+        trigger?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      });
+      const target = Array.from(
+        document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')
+      ).find((item) => item.textContent?.includes('Second workspace'));
+      expect(target).toBeDefined();
+      // The modifier-click hint is not a standing line; it explains itself on
+      // the other workspace's row.
+      expect(document.body.textContent).not.toContain('click to open in a new window');
+      flushSync(() => {
+        target?.focus();
+      });
+      expect(document.body.textContent).toContain('click to open in a new window');
+      flushSync(() => {
+        target?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, button: 2 }));
+      });
+      expect(
+        Array.from(document.querySelectorAll('[role="menuitem"]')).some(
+          (item) => item.textContent === 'Open in new window'
+        )
+      ).toBe(true);
+      expect(selected).toBe('workspace');
+      flushSync(() => {
+        document.activeElement?.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })
+        );
+      });
+      flushSync(() => {
+        target?.click();
+      });
+      expect(selected).toBe('second');
+    } finally {
+      window.__LODY_ELECTRON__ = previous;
+    }
+  });
+
+  it('keeps workspace rows selectable in browsers', () => {
+    let selected = 'workspace';
+    renderSidebar({
+      workspaces: [
+        { id: 'workspace', name: 'Lody', slug: 'lody' },
+        { id: 'second', name: 'Second workspace', slug: 'second' },
+      ],
+      onWorkspaceSelected: (value) => {
+        selected = value;
+      },
+    });
+    const trigger = container?.querySelector('[data-workspace-switcher-trigger]');
+    flushSync(() => {
+      trigger?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    });
+    const target = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')
+    ).find((item) => item.textContent?.includes('Second workspace'));
+    expect(target).toBeDefined();
+    // `data-disabled` is what the shared menu item styling turns into
+    // `pointer-events-none`, so a row carrying it cannot be clicked at all.
+    expect(target?.hasAttribute('data-disabled')).toBe(false);
+    flushSync(() => {
+      target?.click();
+    });
+    expect(selected).toBe('second');
+  });
+
   it('keeps the desktop collapse toggle hover-revealed in browsers', () => {
     renderSidebar({ onRequestCollapse: vi.fn() });
 
-    const button = container?.querySelector('button[aria-label="Collapse sidebar"]');
+    const button = container?.querySelector('button[aria-label="Toggle Sidebar"]');
     expect(button).not.toBeNull();
     expect(button?.className).toContain('opacity-0');
     expect(button?.className).toContain('pointer-events-none');
@@ -83,11 +163,29 @@ describe('LoroSidebar pinned section', () => {
   it('shows the desktop collapse toggle by default in Electron', () => {
     renderSidebar({ isElectron: true, onRequestCollapse: vi.fn() });
 
-    const button = container?.querySelector('button[aria-label="Collapse sidebar"]');
+    const button = container?.querySelector('button[aria-label="Toggle Sidebar"]');
     expect(button).not.toBeNull();
     expect(button?.className).not.toContain('opacity-0');
     expect(button?.className).not.toContain('pointer-events-none');
     expect(button?.className).toContain('focus-visible:outline-hidden');
+  });
+
+  it('renders back and forward next to the collapse toggle', () => {
+    renderSidebar({ onRequestCollapse: vi.fn() });
+
+    const collapse = container?.querySelector('button[aria-label="Toggle Sidebar"]');
+    const back = container?.querySelector('button[aria-label="Back"]');
+    const forward = container?.querySelector('button[aria-label="Forward"]');
+    expect(collapse).not.toBeNull();
+    expect(back).not.toBeNull();
+    expect(forward).not.toBeNull();
+    const parent = collapse?.parentElement;
+    expect(parent).toBe(back?.parentElement);
+    expect(parent?.children[0]).toBe(collapse);
+    expect(parent?.children[1]).toBe(back);
+    expect(parent?.children[2]).toBe(forward);
+    expect(back?.className).toContain('h-5');
+    expect(forward?.className).toContain('h-5');
   });
 
   it('renders pinned conversations before Workspace groups', () => {

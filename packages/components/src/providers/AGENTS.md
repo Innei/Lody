@@ -10,9 +10,8 @@ build does not declare; without the flag loro-mirror rejects the entire state
 with `Unknown property: <key>`, so the older client can never write to that doc
 again. Contract test: `packages/shared/tests/session-doc-forward-compat.test.ts`.
 
-Session Mirrors temporarily use `validateUpdates: false` to avoid blocking writes
-on incompatible old history. Keep external parsers; this is not malformed-input
-safety. Removal requires a reviewed replacement write boundary (PR #460).
+Session docs use `createSessionMirror`; only its HistoryWriter writes history.
+Replacement contract: [shared rules](../../../shared/AGENTS.md#session-history).
 
 ## Streams connection cardinality
 
@@ -37,9 +36,24 @@ safety. Removal requires a reviewed replacement write boundary (PR #460).
 
 ## Workspace runtime
 
+- Background Session prefetch must never acquire a UI Session store or create a
+  Mirror. Its disposable worker owns raw Doc import/export and a separate,
+  rebuildable snapshot cache. Keep one worker task per renderer, terminate before
+  releasing its slot, and detach local peers from the parent on cancellation. The
+  parent must check the durable activity checkpoint before constructing a worker;
+  scope cache rows by workspace and room so auxiliary windows share them.
+  Keep the timestamp-only high-water index as the pre-queue startup filter; it
+  must not load snapshots, Docs, histories, or foreground cursor state.
+  Foreground acquisition cancels that room's prefetch and merges cached binary
+  state into the existing repo document; never replace unsent local edits or share
+  the UI repo's persistence/cursors with the worker. Intent:
+  [background prefetch](../../../../specs/session-background-prefetch.zh.md).
 - `create-workspace-runtime.ts` maintains one Repo view. `WorkspaceTargetRouter` owns
   target ownership and transport selection; do not restore a second writer or a
   proxy-authoring/write-intent mirror.
+- Repo storage, durable Streams cursors, and eager-sync high-water state must use the
+  same per-renderer cache namespace. A checkpoint must never be shared by independently
+  persisted Repo views.
 - Transport state is selected per room, never merged. Runtime stores use
   `getReadinessTransportForRoom`; hooks without the router use the structural binding in
   `src/lib/room-readiness.ts`. Keep those selection rules aligned.
@@ -56,9 +70,8 @@ safety. Removal requires a reviewed replacement write boundary (PR #460).
   force one immediate recovery attempt, but they must preserve the current outage's retry history;
   only a sustained healthy dwell resets backoff. Every attempt after the first is a `recovery`
   phase, including one prompted by a rotated token.
-- Workspace-level rooms without a machine owner use the platform fallback. Task rooms and
-  the Task Index depend on this behavior; returning no transport silently disables task
-  synchronization.
+- Workspace-level rooms without a machine owner use the platform fallback.
+  Returning no transport silently disables synchronization for those rooms.
 - Resource monitoring follows target ownership: local machines use the local monitor
   transport, remote machines use the optional remote transport, and unknown ownership
   remains pending.

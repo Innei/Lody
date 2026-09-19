@@ -62,6 +62,158 @@ describe('AgentClient session preparation gate', () => {
     connectionMocks.newSession.mockResolvedValue({ sessionId: 'acp-session-1' });
   });
 
+  it('keeps Codex reasoning out of history while publishing a transient status label', async () => {
+    const onUpdateMessage = vi.fn();
+    const onLiveReasoningStatus = vi.fn();
+    const client = new AgentClient({
+      logger: createLogger(),
+      sessionId: 'codex-live-reasoning' as SessionId,
+      terminalManager: {} as never,
+      agentConfig: { cliType: 'builtin', agentType: 'codex' },
+      onUpdateMessage,
+      onLiveReasoningStatus,
+      onRequestPermission: vi.fn(),
+    });
+
+    await client.sessionUpdate({
+      sessionId: 'acp-session-1',
+      update: {
+        sessionUpdate: 'agent_thought_chunk',
+        messageId: 'thought-1',
+        content: { type: 'text', text: '**Inspecting' },
+      },
+    } as never);
+
+    expect(onUpdateMessage).not.toHaveBeenCalled();
+
+    await client.sessionUpdate({
+      sessionId: 'acp-session-1',
+      update: {
+        sessionUpdate: 'agent_thought_chunk',
+        messageId: 'thought-1',
+        content: { type: 'text', text: ' workspace**' },
+      },
+    } as never);
+
+    expect(onUpdateMessage).not.toHaveBeenCalled();
+    expect(onLiveReasoningStatus).toHaveBeenLastCalledWith('Inspecting workspace');
+
+    await client.sessionUpdate({
+      sessionId: 'acp-session-1',
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tool-1',
+        title: 'Read package.json',
+        kind: 'read',
+        status: 'in_progress',
+      },
+    } as never);
+
+    expect(onLiveReasoningStatus).toHaveBeenLastCalledWith(null);
+    expect(onUpdateMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ update: expect.objectContaining({ sessionUpdate: 'tool_call' }) })
+    );
+  });
+
+  it('continues to persist thought chunks from non-Codex ACP providers', async () => {
+    const onUpdateMessage = vi.fn();
+    const client = new AgentClient({
+      logger: createLogger(),
+      sessionId: 'claude-thought-history' as SessionId,
+      terminalManager: {} as never,
+      agentConfig: { cliType: 'builtin', agentType: 'claude' },
+      onUpdateMessage,
+      onRequestPermission: vi.fn(),
+    });
+
+    await client.sessionUpdate({
+      sessionId: 'acp-session-1',
+      update: {
+        sessionUpdate: 'agent_thought_chunk',
+        content: { type: 'text', text: 'I should inspect the workspace.' },
+      },
+    } as never);
+
+    expect(onUpdateMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: expect.objectContaining({ sessionUpdate: 'agent_thought_chunk' }),
+      })
+    );
+  });
+
+  it.each(['new', 'load', 'resume', 'fork'] as const)(
+    'carries negotiated local project identity on %s while preserving the claimed worktree',
+    async (operation) => {
+      const project = { version: 1 as const, originProjectPath: '/original-project' };
+      connectionMocks.initialize.mockResolvedValue({
+        agentCapabilities: {
+          loadSession: operation === 'load',
+          sessionCapabilities: { resume: {}, fork: {} },
+          _meta: { lody: { worktreeProject: { version: 1 } } },
+        },
+      });
+      connectionMocks.loadSession.mockResolvedValue({});
+      connectionMocks.resumeSession.mockResolvedValue({});
+      connectionMocks.unstable_forkSession.mockResolvedValue({ sessionId: 'forked' });
+      const client = new AgentClient({
+        logger: createLogger(),
+        sessionId: 'session-1' as SessionId,
+        terminalManager: {} as never,
+        resolveWorktreeProject: async () => project,
+        configOptionValues: { model: 'selected-model' },
+        onUpdateMessage: vi.fn(),
+        onRequestPermission: vi.fn(),
+      });
+      await client.startSession(
+        {} as never,
+        '/provisional',
+        operation === 'load' || operation === 'resume' ? ('existing' as never) : undefined,
+        {},
+        undefined,
+        async () => ({
+          workdir: '/worktree',
+          resumeSessionId:
+            operation === 'load' || operation === 'resume' ? ('existing' as never) : undefined,
+        }),
+        operation === 'fork' ? ('source' as never) : undefined
+      );
+      const request =
+        operation === 'new'
+          ? connectionMocks.newSession
+          : operation === 'load'
+            ? connectionMocks.loadSession
+            : operation === 'resume'
+              ? connectionMocks.resumeSession
+              : connectionMocks.unstable_forkSession;
+      expect(request).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cwd: '/worktree',
+          _meta: {
+            lody: {
+              worktreeProject: project,
+              sessionConfig: { version: 1, configOptionValues: { model: 'selected-model' } },
+            },
+          },
+        })
+      );
+    }
+  );
+
+  it('keeps project lookup disabled when the agent does not advertise support', async () => {
+    const client = new AgentClient({
+      logger: createLogger(),
+      sessionId: 'session-1' as SessionId,
+      terminalManager: {} as never,
+      resolveWorktreeProject: async () => {
+        throw new Error('unexpected project lookup');
+      },
+      onUpdateMessage: vi.fn(),
+      onRequestPermission: vi.fn(),
+    });
+    await client.startSession({} as never, '/worktree');
+    expect(connectionMocks.newSession).toHaveBeenCalledWith({ cwd: '/worktree', mcpServers: [] });
+  });
+
   it('initializes before the claim and starts the ACP session only with the claimed workdir', async () => {
     const target = deferred<{ workdir: string }>();
     const stages: string[] = [];
@@ -486,7 +638,6 @@ describe('AgentClient session preparation gate', () => {
       machineId: 'machine-1' as MachineId,
       terminalManager: {} as never,
       agentConfig: { cliType: 'builtin', agentType: 'deepseek' },
-      taskToolsEnabled: true,
       onUpdateMessage: vi.fn(),
       onRequestPermission: vi.fn(),
     });
@@ -505,7 +656,6 @@ describe('AgentClient session preparation gate', () => {
             { name: 'LODY_MCP_WORKSPACE_ID', value: 'workspace-1' },
             { name: 'LODY_MCP_MACHINE_ID', value: 'machine-1' },
             { name: 'LODY_MCP_WORKDIR', value: '/workdir' },
-            { name: 'LODY_MCP_TASK_TOOLS_ENABLED', value: '1' },
           ]),
         }),
       ],

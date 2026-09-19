@@ -7,17 +7,20 @@ import {
   type MachineViewMeta,
   type ProviderSetupTask,
 } from '@lody/shared';
-import { Loader2, RotateCcw, Trash2, XCircle } from 'lucide-react';
+import { RotateCcw, Trash2 } from 'lucide-react';
+import { Spinner } from '@/ui/spinner';
 
 import { AgentReadinessMark, type AgentReadiness } from '@/components/shared/agent-readiness-mark';
 import { Button } from '@/ui/button';
 import { cn } from '@/lib/utils';
+import { openExternalUrl } from '@/lib/native-browser';
 import { activeWorkspaceRuntimeAtom } from '@/atoms/runtime';
 import { useMachineAcpBinaryProgress } from '@/hooks/use-machine-acp-binary-progress';
 import { useMachineOnlineStatus } from '@/hooks/use-machine-online-status';
 import { AcpAuthenticationPanel } from './acp-authentication-panel';
 import { labelForAgent } from './provider-row';
 import { ProviderProgressButton } from './provider-progress-button';
+import { BUB_ACP_INSTALL_DOCS_URL, BubInstallGuide } from './bub-install-guide';
 
 export type ProviderSetupRowProps = {
   setup: ProviderSetupTask;
@@ -38,6 +41,10 @@ export function ProviderSetupRow({
   const { t } = useTranslation();
   const [actionPending, setActionPending] = useState<'retry' | 'delete' | null>(null);
   const config = setup.config;
+  const isBubSetup = config.cliType === 'builtin' && config.agentType === 'bub';
+  const installDocsUrl = isBubSetup ? BUB_ACP_INSTALL_DOCS_URL : undefined;
+  const showBubInstallCommand =
+    isBubSetup && setup.status === 'failed' && setup.failureCode === 'runtime-unavailable';
   const runtime = useAtomValue(activeWorkspaceRuntimeAtom);
   const runtimeProgress = useMachineAcpBinaryProgress(runtime, setup.machineId, config.agentType);
   const machineOnline = useMachineOnlineStatus(setup.machineId) === 'online';
@@ -80,6 +87,12 @@ export function ProviderSetupRow({
         return t('settings.agent.setup.awaitingAuth', 'Sign in to finish this provider setup.');
       case 'failed':
         if (setup.failureCode === 'runtime-unavailable') {
+          if (isBubSetup) {
+            return t(
+              'settings.agent.setup.bubInstallRequired',
+              'Bub or its ACP server is not installed on the target machine.'
+            );
+          }
           return t(
             'settings.agent.setup.runtimeUnavailable',
             'This runtime is not available on the target machine.'
@@ -147,21 +160,14 @@ export function ProviderSetupRow({
           size="md"
         />
         <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-medium">{config.name}</div>
+          <div className="truncate text-sm font-normal">{config.name}</div>
           <div className="truncate text-xs text-muted-foreground">
             {labelForAgent(config.cliType, config.agentType)}
           </div>
         </div>
-        {/* Status column, then action column, then delete — the same three
-            slots an AgentConfig row uses, in the same order, so a pending setup
-            above a published agent lines up with it instead of ragging the
-            list. The middle slot is empty here because a setup has nothing to
-            edit; the width stays reserved, which is what holds the column. */}
-        <div className="flex min-w-20 shrink-0 justify-end">
-          {setup.status === 'failed' ? (
-            <XCircle className="h-4 w-4 shrink-0 text-status-error" />
-          ) : null}
-        </div>
+        {/* Reserve the provider row's status and edit columns so setup actions
+            stay aligned with published providers. Failures are explained below. */}
+        <div className="min-w-20 shrink-0" aria-hidden="true" />
         <div className="flex shrink-0 items-center gap-1 pr-3">
           <div className="w-12 shrink-0" />
           <div className="flex w-20 shrink-0 items-center justify-end">
@@ -188,7 +194,7 @@ export function ProviderSetupRow({
                 onClick={() => void runAction('retry', onRetry)}
               >
                 {actionPending === 'retry' ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  <Spinner className="h-3.5 w-3.5" />
                 ) : (
                   <RotateCcw className="h-3.5 w-3.5" />
                 )}
@@ -206,7 +212,7 @@ export function ProviderSetupRow({
             onClick={() => void runAction('delete', onDelete)}
           >
             {actionPending === 'delete' ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              <Spinner className="h-3.5 w-3.5" />
             ) : (
               <Trash2 className="h-3.5 w-3.5" />
             )}
@@ -216,6 +222,25 @@ export function ProviderSetupRow({
       {/* Aligned to the name above it, not to the card edge: the sentence is
           about this agent, so it starts where the agent's text column starts. */}
       <p className="ml-[3.25rem] pb-3 pr-3 text-xs text-muted-foreground">{statusText}</p>
+      {showBubInstallCommand ? (
+        <div className="ml-[3.25rem] space-y-2 pb-3 pr-3">
+          <BubInstallGuide />
+        </div>
+      ) : setup.status === 'failed' && installDocsUrl ? (
+        <div className="ml-[3.25rem] pb-3 pr-3">
+          <Button
+            type="button"
+            variant="link"
+            size="sm"
+            className="h-auto p-0 text-xs"
+            onClick={() => {
+              void openExternalUrl(installDocsUrl);
+            }}
+          >
+            {t('settings.agent.dialog.bubInstallDocs', 'Open install guide')}
+          </Button>
+        </div>
+      ) : null}
       {setup.status === 'awaiting-auth' ? (
         <div className="ml-[3.25rem] pb-3 pr-3">
           <AcpAuthenticationPanel

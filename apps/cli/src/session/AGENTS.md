@@ -2,7 +2,7 @@
 
 `CLAUDE.md` is a symlink to this file. Edit `AGENTS.md` only.
 
-Rules only; responsibilities and reasoning: [README.md](README.md). Worktrees and git
+Rules only; rationale: [README.md](README.md). Worktrees and git
 credentials: [worktree/AGENTS.md](worktree/AGENTS.md). Architecture: context/message-flow.md.
 Contract: specs/session-orchestration.md.
 
@@ -19,14 +19,13 @@ Contract: specs/session-orchestration.md.
   exists; retries and recovery never reread mutable history.
 - Machine and Provider credentials stay execution-host scoped; attribution, authorization,
   GitHub, and Git identity use the frozen identity, never the Session owner.
-- Git identity: owner prefers machine then requester; others never read machine config.
-  Never restart ACP/sandbox for identity, even in preparations.
-  Use `CloudPort`; reject placeholders.
+- Git: owner uses local config, no profile query; others never read it.
+  `CloudPort` profiles: 60s deadline, retry failures, reject placeholders.
+  Identity never restarts ACP/sandbox, even in prep.
 
 ## Dispatch
 
-- Queue-to-history promotion preserves every frozen Turn field, `agentRoleId` and
-  `agentRoleRevision` included.
+- Queue promotion preserves frozen fields; remove its row only after history and activation succeed.
 - Absent session meta is "unknown", not foreign: hold the TTL-bounded RPC stash until meta lands;
   drop it only on a definitive verdict.
 - Subscribe to RPC offers BEFORE awaiting Doc Room join/sync and never dispatch from the RPC
@@ -38,44 +37,46 @@ Contract: specs/session-orchestration.md.
 - Never re-dispatch a late-arriving history entry; recovery is a fresh send.
 - `hasPendingUserTurnActivation` is the ONLY pending-turn predicate; never compare those two
   pointers in a consumer.
-- Session metadata is the activation index: never inspect historical Session documents to infer
-  work, and never publish or clear active presence here (`../lib/loro/session-active-presence.ts`).
+- Never inspect historical Session documents to infer work, or publish or clear active presence
+  here (`../lib/loro/session-active-presence.ts`).
 - Keep bootstrap and live reconciliation bounded as README describes; add no per-trigger scan or
   extra throttle.
 
 ## Turn execution
 
-- Gate turn-scoped history LIST writes on user-entry sync (`turn-history-gate.ts`, 20s);
-  never gate status or meta writes.
-- An `active` session goal must not suppress turn completion or its notification.
-- Never mint a second visible turn while a `TurnRuntimeState` is registered; derive assistant
-  entry ids from `userTurnId`. `invocation` atomically owns source Turn, requester, and input
-  config; steer replaces it before tool execution.
+- Gate turn-scoped LIST writes on user-entry sync (`turn-history-gate.ts`, 20s), never status/meta.
+- Goals obey [this contract](../../../../specs/session-goal-control.md).
+- Stop ends local steer waits, not the owner fiber. Drain raw prompt/steer/config work before
+  reuse, or confirm termination. Assistant ids use `userTurnId`.
+  `invocation` owns source Turn, requester and config atomically; steer replaces it before tools.
 - Publish `latestUserMsgId` in the SAME write as the history append (`appendUserTurn`). Only
   dispatch producers publish it. Renderer sends and queue promotion retain the missing-history
   tombstone; CLI dispatch producers keep their own marker policy.
 - Ordinary turn execution writes only `processingUserMsgId` and `lastHandledUserMsgId`; no start
   or terminal path may read-await-rewrite the other slots.
-- INVARIANT: a steer the agent never accepted must not stay parked in `pending_apply`. Requeue it
-  through the pointer, not the entry status, only for pre-submission rejections or
-  `AgentSteerNotDeliveredError`; skip active or already-handled entries.
+- Never steer after cancellation or infer delivery from it. Stop uses
+  `pendingInput: promote` / `prePromptSession: discard`; Edit & Resend uses preserve/keep,
+  access revocation preserve/discard. Limit create/restore fences to initialization.
+- Promote only proven non-delivery via `steerTurnStatuses`, never producer pointers.
+  Unknown never replays; RPC ACKs never revive history. Surface recovery errors.
+- Foreground/steer config uses its owner signal; fence mutations after interrupt.
 - Resume must REOPEN the in-progress assistant entry, clearing
   `finished`/`endedAt`/`permissionWaitMs` there only; never write `finished=false` from teardown.
 - Keep JSON-RPC/transport matching in `acp-error-classification.ts`: disposed/stale `-32603` is
   `agent_disconnected`, Harness compression mismatch is `acp_session_storage_incompatible`.
 - Continue-session recovery may restore the ACP session and retry the same prompt once, only
   while that turn has no ACP output.
-- INVARIANT: a resolved prompt is not proof of success. A turn that emitted no ACP update takes
-  `recordSilentTurnFailure`, not `setDispatchHandled` (read `turnProducedVisibleOutput` before
-  `finalizeTurn` clears it); it still finalizes, still ADVANCES the pointer, and fails open.
+- A turn with no ACP updates takes `recordSilentTurnFailure`, not `setDispatchHandled`.
+  Read `turnProducedVisibleOutput` before `finalizeTurn` clears it; still finalize, advance
+  the pointer, and fail open.
 - Diff content comes only from the CLI-local ACP evidence store; GitHub `diffStats` use PR compare
   semantics, and `session-diff-stats-target.ts` skips rather than overwrites a good total.
 
 ## Lifecycle
 
-- `Session.createAgent` acquires the shared ACP start gate before spawn. ACP terminal creation
-  passes the protocol's executable and argv straight to `SessionSandbox.spawn`, never a rebuilt
-  shell command.
+- `Session.createAgent` takes the shared ACP start gate before spawn. ACP terminal creation spawns
+  the protocol's executable and argv; the only rebuild is the unsplit `sh -c` fallback. A failed
+  spawn is a JSON-RPC rejection, not a hung wait.
 - Child tab sessions reuse the parent workspace directory. Never write per-session workspace paths
   into `MachineMeta`: the machine publishes `['dotlodyPath']` and frontends derive them.
 - INVARIANT: any `sandbox.spawn` whose OUTPUT is the result must pass `captureOutput: true` (ACP
@@ -104,11 +105,10 @@ Contract: specs/session-orchestration.md.
 - Fork recovery fail-closes interrupted operations and finds them ONLY in the machine-local marker
   store under `withForkOperationLock`. Never enumerate rooms or open docs to find candidates, and
   never `cleanSessionDoc` a doc you do not own.
-- Edit-and-resend prepares provider `forkAtTurn` (`session/new` for the first User), cancels the
-  exact active turn, waits for ownership release, then one durable history/meta commit.
-  Its rewrite barrier excludes queue promotion and blocks dispatch and steer; the queue is never
-  rewritten. Keep the original User attribution, config, and attachments, use new turn ids and ACP
-  identity, and never replay transcript or roll back files.
+- Edit-and-resend prepares `forkAtTurn` (`session/new` for the first User), cancels the exact
+  turn, waits for release, then commits history/meta. Its barrier excludes queue promotion,
+  dispatch and steer. Keep the queue, User attribution/config/attachments; use new turn/ACP ids.
+  Never replay transcript or roll back files.
 
 ## Access
 

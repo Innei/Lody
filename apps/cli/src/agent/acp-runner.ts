@@ -71,6 +71,7 @@ import { withLoopbackNoProxy } from '@lody/shared/proxy-env';
 import { withAcpSessionStartSlot } from './acp-session-start-gate';
 
 export type CreateAcpClientOptions = {
+  resolveWorktreeProject?: AgentClientOptions['resolveWorktreeProject'];
   stream: Stream;
   workdir: string;
   logger: Logger;
@@ -80,7 +81,6 @@ export type CreateAcpClientOptions = {
     agentType: string;
   };
   configOptionValues?: AgentClientOptions['configOptionValues'];
-  taskToolsEnabled?: boolean;
   /** Launcher family (npx/uvx/local) for ACP startup analytics; non-PII. */
   launcher?: AcpLauncher;
   resumeSessionId?: ACPSessionId;
@@ -96,6 +96,7 @@ export type CreateAcpClientOptions = {
   machineId?: MachineId;
   onStartupStage?: (event: AcpStartupStageEvent) => void;
   onUpdateMessage(message: AcpSessionNotification): void;
+  onLiveReasoningStatus?(label: string | null): void;
   onRequestPermission(
     requestId: string,
     request: RequestPermissionRequest
@@ -128,11 +129,12 @@ export const createAcpClient = async (options: CreateAcpClientOptions) => {
     terminalManager: options.terminalManager,
     agentConfig: options.agentConfig,
     configOptionValues: options.configOptionValues,
-    taskToolsEnabled: options.taskToolsEnabled,
+    resolveWorktreeProject: options.resolveWorktreeProject,
     launcher: options.launcher,
     terminalEnabled: options.terminalEnabled,
     onStartupStage: options.onStartupStage,
     onUpdateMessage: options.onUpdateMessage,
+    onLiveReasoningStatus: options.onLiveReasoningStatus,
     onRequestPermission: options.onRequestPermission,
     onUsageUpdate: options.onUsageUpdate,
     onContextWindowUsageUpdate: options.onContextWindowUsageUpdate,

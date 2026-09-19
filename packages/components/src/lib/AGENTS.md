@@ -22,9 +22,11 @@ Rationale: [components](../../../../.agents/docs/components-package.md) and
 - `ErrorBoundary`'s `error-boundary-fallback.tsx` displays the real error and one-click
   full-report copy on every build. Details default visible (`showErrorDetails` opts out);
   `lib/error-boundary-report.ts` is the pure copy builder.
-- Crash screens never reload/restart/reset by themselves. `resetKeys` recovery stops at
-  `MAX_AUTOMATIC_RESETS` per repeating error; the fallback reports that retrying stopped,
-  stays visible, and waits for a button press.
+- Crash screens never reload/restart/reset themselves. `resetKeys` must not clear a captured
+  error; the copyable fallback stays visible until the user presses a recovery button.
+- A cloud query throws into render and keeps throwing. An optional surface inside a larger
+  boundary owns an inline `ErrorBoundary`, so a backend failure degrades locally instead of
+  replacing the host subtree.
 - `lib/clear-local-cache.ts` owns `markCacheClearPending` (recoverable `lody*` caches,
   still signed in) and `startHardReset` (full wipe/sign-out with its own confirmation
   dialog). Defer asynchronous deletes to next boot; clear synchronous storage BEFORE
@@ -69,6 +71,13 @@ Rationale: [components](../../../../.agents/docs/components-package.md) and
   All Changes, or the removed v1 capture. File/diff reads retain cross-render in-flight
   limits; active requests release slots only on settlement.
 
+- Preview and More-menu shell actions share `useSessionFileActions`. Only Electron
+  on the session's own machine may invoke them; explicit local absolute artifact
+  paths stay absolute, and remote paths never launch on the viewer's machine.
+- Native file sharing uses complete authorized preview bytes, never a remote host
+  path. Keep the existing transfer limits; stage each export in an isolated cache
+  file and clean up after cancellation, failure, or handoff.
+
 ## File identity, caching, and errors
 
 - `session-file-open-target.ts` alone owns path normalization. Canonical workspace-relative
@@ -97,6 +106,10 @@ Rationale: [components](../../../../.agents/docs/components-package.md) and
   POSIX and Windows drive roots (`/`, `C:/`) during normalization and insertion.
 
 ## ACP dispatch
+
+- Automatic Role cleanup requires a fresh matching runtime schema and owner access.
+  Persist through a conditional writer transaction; never overwrite intervening edits
+  or clear model/permission pins. See [intent](../../../../specs/agent-role-schema-reconciliation.md).
 
 - Display every provider-supplied rate-limit window name with localized duration via
   `formatAgentRateLimitWindowLabel`, even when duration/utilization/reset match.

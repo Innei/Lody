@@ -1,3 +1,4 @@
+import { isSessionWindow } from '@lody/components/lib/desktop-window'
 import { useLayoutEffect } from 'react'
 import { createRoot } from 'react-dom/client'
 import { createHashHistory, RouterProvider } from '@tanstack/react-router'
@@ -17,10 +18,10 @@ import { getIpcServices } from '@lody/components/lib/electron-ipc-client'
 import { Provider } from 'jotai'
 
 import { ErrorBoundary } from '@/components/error-boundary'
-import { authClient, completeElectronAuthCallback, isElectronAuthCallbackActive } from './auth'
+import { authClient } from './auth'
 import { installNativeTabBehavior } from './native-tab-behavior'
 import { createRendererErrorReporting, type RendererFatalScope } from './renderer-error-reporting'
-import { DesktopDevbar } from './desktop-devbar'
+import { DesktopDevbar } from './devbar/index'
 
 // Desktop windows should not Tab-cycle a focus ring through the whole UI like a web page.
 installNativeTabBehavior()
@@ -139,19 +140,26 @@ try {
     jotaiStore.set(languageAtom, detectedLanguage)
   }
 
-  const isFileProtocol = window.location.protocol === 'file:'
+  const usesHashHistory =
+    window.location.protocol === 'file:' || window.location.pathname.endsWith('/devbar.html')
   const devbar = await getIpcServices()
     ?.app.getDevbarConfig()
     .catch(() => null)
   if (devbar?.enabled) document.documentElement.setAttribute('data-desktop-devbar', '')
   const router = createRouter({
     authClient,
-    desktopAuth: {
-      completeCallback: completeElectronAuthCallback,
-      isCallbackActive: isElectronAuthCallbackActive
-    },
-    history: isFileProtocol ? createHashHistory() : undefined
+    history: usesHashHistory ? createHashHistory() : undefined
   })
+  if (isSessionWindow() && !sessionStorage.getItem('lody:windowFocusConsumed')) {
+    const sessionId = router.history.location.pathname.split('/sessions/')[1]?.split('/')[0]
+    if (sessionId) {
+      router.history.replace(router.history.location.href, {
+        ...router.history.location.state,
+        focusComposerSessionId: sessionId
+      })
+      sessionStorage.setItem('lody:windowFocusConsumed', '1')
+    }
+  }
   createRoot(rootElement, {
     // ErrorBoundary remains the single owner of caught-error UI and PostHog.
     // React 19 no longer rethrows render errors, so these root callbacks only
@@ -166,7 +174,13 @@ try {
           <RouterProvider router={router} />
         </Provider>
       </ErrorBoundary>
-      {devbar?.enabled && <DesktopDevbar />}
+      {devbar?.enabled && (
+        // A diagnostics footer must never take the app down with it: a crash
+        // here degrades to no bar, not to the fatal renderer path.
+        <ErrorBoundary name="DesktopDevbar" fallbackRender={() => null}>
+          <DesktopDevbar />
+        </ErrorBoundary>
+      )}
     </>
   )
 } catch (error) {

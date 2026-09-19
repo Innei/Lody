@@ -32,6 +32,7 @@ import {
   getManagedAgentRuntimeManager,
   GROK_ACP_ADAPTER_VERSION,
   KIMI_CODE_VERSION,
+  PI_RUNTIME_VERSION,
   type ManagedRuntimeLaunch,
   type ManagedRuntimeName,
   type ManagedRuntimeProgressCallback,
@@ -119,6 +120,11 @@ export type ResolveBuiltinAuthenticationProcessLaunchInput = ResolveACPSettingIn
 };
 
 export const BuiltinACPSetting: Record<CliType, ACPSetting> = {
+  pi: {
+    packageName: 'acp-extension-pi',
+    version: PI_RUNTIME_VERSION,
+    binName: 'acp-extension-pi',
+  },
   kimi: {
     packageName: '@moonshot-ai/kimi-code',
     version: KIMI_CODE_VERSION,
@@ -147,6 +153,13 @@ export const BuiltinACPSetting: Record<CliType, ACPSetting> = {
   },
 };
 
+/**
+ * Capability-cache source version for Bub. Bub is a user-installed CLI
+ * (`bub acp`) that Lody does not manage or version; the static key keeps
+ * a capability probe valid until the next explicit refresh.
+ */
+const BUILTIN_BUB_CAPABILITY_SOURCE_VERSION = 'builtin-bub:acp';
+
 // Serve npx launches from the local cache when the package is already
 // installed; go to the registry only on a cache miss. Registry agent specs are
 // exact-version pinned, so a cache hit is immutable and integrity-checked —
@@ -173,6 +186,14 @@ const KIMI_CODE_ACP_PATH_RELATIVE_DIR = '.kimi-code/bin';
 const registryAgentsById: Record<string, RegistryAcpAgent> = Object.fromEntries(
   REGISTRY_ACP_AGENTS.map((agent) => [agent.id, agent])
 );
+// Keep existing providers and stored turns runnable until their owner chooses
+// migration. This compatibility entry is deliberately absent from the catalog.
+registryAgentsById['pi-acp'] = {
+  id: 'pi-acp',
+  name: 'Pi ACP (legacy)',
+  version: '0.0.33',
+  distribution: { npx: { package: 'pi-acp@0.0.33' } },
+};
 
 export function resolveBuiltinACPSetting(agentType: string): ResolvedACPSetting {
   if (!isBuiltinAgentType(agentType)) {
@@ -216,6 +237,9 @@ export function getAcpCapabilitySourceVersion(
           ? `builtin-kimi:${managedRuntimeVersion}`
           : `${BUILTIN_KIMI_CAPABILITY_SOURCE_VERSION}${runtimeOverrideSuffix}`;
       }
+      if (input.agentType === 'pi') {
+        return `builtin-pi:${managedRuntimeVersion ?? PI_RUNTIME_VERSION}`;
+      }
       if (input.agentType === 'grok') {
         return managedRuntimeVersion
           ? `builtin-grok-acp:${GROK_ACP_ADAPTER_VERSION}+official-grok:${managedRuntimeVersion}`
@@ -226,6 +250,11 @@ export function getAcpCapabilitySourceVersion(
         return baseUrl?.trim()
           ? `${DEEPSEEK_HARNESS_CAPABILITY_SOURCE_VERSION}+endpoint:${createHash('sha256').update(baseUrl).digest('hex').slice(0, 12)}`
           : DEEPSEEK_HARNESS_CAPABILITY_SOURCE_VERSION;
+      }
+      if (input.agentType === 'bub') {
+        // Bub is a user-installed CLI whose version Lody does not own, so the
+        // cache key is static. A manual refresh re-probes after an upgrade.
+        return BUILTIN_BUB_CAPABILITY_SOURCE_VERSION;
       }
     }
     return `builtin:${input.agentType}:unknown`;
@@ -312,10 +341,13 @@ export function resolveCustomACPSetting(
   agentType: string,
   customAcp: CustomAcpLaunchSpec | undefined
 ): ResolvedACPSetting {
-  const command = customAcp?.command.trim();
-  if (!command) {
+  const configured = customAcp?.command.trim();
+  if (!configured) {
     throw new Error(`Custom ACP ${agentType} has no launch command configured`);
   }
+  // The launch command is typed by a human, so it can start with `~`. spawn()
+  // does not expand it and the agent would fail to start with ENOENT.
+  const command = expandHomePath(configured);
   return {
     status: { agent: `custom:${agentType}`, command },
     exec: { command, args: [...(customAcp?.args ?? [])] },
@@ -398,8 +430,28 @@ async function resolveBuiltinACPProcessLaunch(
       capabilitySourceVersion: getAcpCapabilitySourceVersion(input),
     };
   }
+  if (input.agentType === 'bub') {
+    // Bub ships its own `bub acp` ACP server and is installed by the user
+    // (`bub install bub-acp-server`). Lody neither downloads nor versions it;
+    // when the command is missing the spawn fails and the UI points at the
+    // install guide. `bub` is resolved from the same augmented PATH as other
+    // user-installed local ACP agents.
+    return {
+      command: 'bub',
+      args: ['acp', ...(input.extraArgs ?? [])],
+      capabilitySourceVersion: getAcpCapabilitySourceVersion(input),
+    };
+  }
   if (!isManagedBuiltinAgentType(input.agentType)) {
     throw new Error(`Unsupported managed builtin ACP type: ${input.agentType}`);
+  }
+  if (input.agentType === 'pi') {
+    const runtime = await resolveManagedRuntimeForLaunch('pi', input);
+    return {
+      command: process.execPath,
+      args: [runtime.command, ...(input.extraArgs ?? [])],
+      capabilitySourceVersion: getAcpCapabilitySourceVersion(input, runtime.version),
+    };
   }
   if (input.agentType === 'kimi') {
     const overridePath = trimRuntimeOverride(input.runtimeOverrides?.kimiPath);
@@ -474,6 +526,13 @@ export async function resolveBuiltinAuthenticationProcessLaunch(
 ): Promise<ResolvedACPProcessLaunch | null> {
   if (input.cliType !== 'builtin' || !isManagedBuiltinAgentType(input.agentType)) {
     throw new Error(`Unsupported builtin authentication type: ${input.agentType}`);
+  }
+
+  if (input.agentType === 'pi') {
+    if (input.action === 'status') return null;
+    throw new Error(
+      'Configure Pi credentials through provider environment variables or Pi settings.'
+    );
   }
 
   if (input.agentType === 'kimi') {

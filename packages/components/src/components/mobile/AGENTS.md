@@ -37,9 +37,8 @@ before touching gestures.
 
 ## Home and chat lists
 
-- Inbox renders only on `showInboxTab`, Tasks only on `showTasksTab`
-  (`../tasks/AGENTS.md`). Keep the chat/projects group mounted-but-hidden so
-  pull-to-refresh and scroll position survive tab round-trips.
+- Inbox renders only on `showInboxTab`. Keep the chat/projects group
+  mounted so pull-to-refresh and scroll position survive tab round-trips.
   `../chat/chat-landing.tsx` owns the default home tab; the workspace stack only
   keeps `/chat` base context mounted under drawers.
 - The sticky home header is ONE chrome row (workspace | search |
@@ -74,7 +73,7 @@ before touching gestures.
   live status via ONE derived atom over `sessionLiveStatusAtomFamily` (never a
   loop of `useAtomValue`) and unread via `lastMessageAt > lastReadAt`.
 - Conversation rows follow the shared tab order (main first, NOT time) with no
-  close/check affordance; `requestPermission` is the warning-tone hand
+  check affordance; close buttons use the shared tab-close action. `requestPermission` is the warning-tone hand
   outranking the spinner; the header tab badge stays two-state; `Files` leads
   the Viewers card unconditionally. The menu sheet stays flat, and its Owner row
   (multi-member only, writes `SessionMeta.userId`) is a DISCLOSURE, not a list.

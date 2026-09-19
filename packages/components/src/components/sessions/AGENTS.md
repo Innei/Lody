@@ -2,26 +2,21 @@
 
 `CLAUDE.md` is a symlink to this file. Edit `AGENTS.md` only.
 
-Files: [README.md](README.md). Data: `context/message-flow.md`. Package:
-[../../../AGENTS.md](../../../AGENTS.md). Scopes:
-[components/](components/AGENTS.md), [message-queue/](message-queue/AGENTS.md).
-
-Each rule is compressed; its heading links the full text. Read it before
-changing those files.
+Parent AGENTS apply. Files: [README.md](README.md); data: `context/message-flow.md`.
+Read each heading’s linked context before changing its files.
 
 ## [Tabs and `?tab` routing](../../../../../.agents/docs/sessions-tabs-routing.md)
 
-- Desktop chrome is ONE merged `SessionTabBar` row: traffic-light insets gated
-  on `!useElectronFullscreen()`, pill/card geometry (y=8 line, `mt-0.5`,
-  button centering) re-derived and MEASURED, never eyeballed.
-- Keep the surface ladder canvas → inactive → active in both themes and MEASURE
-  it; never give inactive tabs more chrome than the active one, and never use
+- ONE `SessionTabBar` row; traffic-light insets gated on `!useElectronFullscreen()`.
+  Hide IDE/share pills below `SESSION_PAGE_HEADER_PILLS_MIN_WIDTH_PX`; keep them on `⋯`.
+- Conversation and side-panel tabs share `TAB_PILL_*_CLASS`. Never
   `--tab-active`/`--tab-inactive` (both collapse onto `--background` in dark).
 - One leading status slot per tab, `waiting > working > unread > agent icon`;
   test `isWaiting` first, and never drop unread from a tab renderer.
-- `?tab` is the single source of truth for the active tab: derive it from route
-  search, navigate instead of setting state, never reintroduce mirrored state or
-  URL↔state sync effects (#193), and never rewrite the URL from observed data.
+- `?tab` owns selection; never mirror it in state (#193). Confirmed shared closure
+  may replace the current choice with a neighbour or local draft. Close writes
+  `isTabClosed`, never archive — a never-messaged tab is exact-deleted.
+  Reopening archives restores lifecycle first.
 - `Change owner` writes the OWNER `SessionMeta.userId`, never sharing/visibility;
   they stay separate actions.
 
@@ -55,11 +50,13 @@ changing those files.
 
 ## [Conversation surface](../../../../../.agents/docs/sessions-surface.md)
 
+- Message-list crash fallback preserves the composer and copies the shared report,
+  including the original error and caught React component stacks.
 - Read receipts are gated on VISIBILITY, not on being mounted: keep the
   explicit per-surface `isVisible` prop.
-- "Copy as Markdown" uses `buildConversationMarkdown`, never
-  `buildReplayPromptFromHistory`; message text is never trimmed and what was
-  trimmed must reach the toast.
+- Markdown copy uses `buildConversationMarkdown`, not `buildReplayPromptFromHistory`:
+  keep prose whole, cap thinking rather than drop it, toast every omission, and
+  include the selected message regardless of ACP fork support.
 - Read ACP capabilities via `useResolvedMachineMeta()` and selectors via
   `useSessionAcpSelectorContext()`; the controlled composer must not recompute
   selector options.
@@ -83,7 +80,8 @@ changing those files.
   to unedited composer fields, never infer runtime config from a permission
   click, and freeze a non-Plan mode for explicit execution actions.
 - `AgentRoleDetailPane` is the ONE pane that reads a Role and shows only what it
-  pins; `AgentRoleEditorDialog` is the one editor.
+  pins; `AgentRoleEditorDialog` is the one editor. When the pane cannot fit,
+  `ComposerAgentRolePanel` puts agent · model on a second line instead.
 
 ## [Live status and dispatch](../../../../../.agents/docs/sessions-live-status.md)
 
@@ -99,9 +97,10 @@ changing those files.
 - Canonical cluster in CONSTANT order + exactly one staged item; no items hides
   the bar (unless syncing) and the stage never empties or relayouts on click.
 - The stage icon is inert, colour is reserved for genuine status, and nothing
-  in the bar pulses or relayouts.
-- The Open preview chip stays gated on a real reported preview target, and
-  repository actions are priority-ordered and never duplicated below the reply.
+  in the bar pulses.
+- Open preview stays gated on a real reported target; repository actions are
+  priority-ordered (dirty ⇒ Commit & Push), collapse into one, never duplicated
+  below the reply.
 
 ## [Auto review, status slot](../../../../../.agents/docs/sessions-auto-review.md)
 

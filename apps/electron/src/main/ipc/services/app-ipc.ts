@@ -1,3 +1,6 @@
+import { assertProductWindowSender } from '../assert-sender'
+import { productWindows } from '../../window-state'
+import { parseWindowTarget, openSessionWindow, type WindowTarget } from '../../session-windows'
 import { access } from 'node:fs/promises'
 import { isAbsolute } from 'node:path'
 import { BrowserWindow, nativeTheme, shell, systemPreferences } from 'electron'
@@ -13,9 +16,12 @@ import {
   type WindowBadgeInput
 } from '@lody/shared/electron-ipc'
 import { getIpcServiceDeps } from '../ipc-service-deps'
-import { getDevbarConfig, getDevbarMetrics } from '../../services/devbar-service'
+import { parseDevbarControlInput } from '../../services/devbar/control'
+import { getDevbarConfig, getDevbarMetrics, setDevbarControl } from '../../services/devbar/service'
 import { setMenuLanguage } from '../../menu'
+import { localFileActionError } from '../../services/local-file-action-error'
 import { hasPathLauncher, launchLocalPath } from '../../services/local-path-launcher-service'
+import { takePendingRendererLocalClear } from '../../services/local-reset-service'
 import { parseWindowBadge } from '../../services/window-badge-service'
 import {
   findWindow,
@@ -93,8 +99,74 @@ export class AppIpc extends IpcService {
   static override readonly groupName = 'app'
 
   @IpcMethod()
+  async openWindow(raw: WindowTarget) {
+    const { event } = getIpcContext()
+    assertProductWindowSender(event)
+    openSessionWindow(parseWindowTarget(raw))
+  }
+
+  @IpcMethod()
+  async prepareCacheClear() {
+    const { event } = getIpcContext()
+    assertProductWindowSender(event)
+    for (const window of productWindows) {
+      if (window.webContents !== event.sender) window.destroy()
+    }
+  }
+
+  /**
+   * Reports a cache clear armed from the CLI (`lody app reset-cache`) to the
+   * booting renderer, which owns the precise clear. One-shot: a later reload of
+   * the same window must not repeat it.
+   */
+  @IpcMethod()
+  async consumePendingLocalClear() {
+    const { event } = getIpcContext()
+    assertProductWindowSender(event)
+    return takePendingRendererLocalClear()
+  }
+
+  @IpcMethod()
   async getDevbarConfig() {
     return getDevbarConfig()
+  }
+
+  @IpcMethod()
+  async setDevbarControl(raw: unknown) {
+    const { event } = getIpcContext()
+    assertProductWindowSender(event)
+    const window = BrowserWindow.fromWebContents(event.sender)
+    const mainWindow = getIpcServiceDeps().getMainWindow()
+    if (!window || window !== mainWindow) {
+      return { ok: false as const, error: 'main_window_required' as const }
+    }
+
+    let input
+    try {
+      input = parseDevbarControlInput(raw)
+    } catch {
+      return { ok: false as const, error: 'invalid_input' as const }
+    }
+
+    const result = await setDevbarControl(input)
+    const reload = (enabled: boolean): void => {
+      setImmediate(() => {
+        if (window.isDestroyed()) return
+        void getIpcServiceDeps()
+          .reloadMainWindowForDevbar(window, enabled)
+          .catch((error) => {
+            console.error('[Devbar] Failed to switch renderer entry', error)
+          })
+      })
+    }
+    if (!result.ok) {
+      // A failed capability restart has already closed the previous Hub. Leave
+      // the dedicated renderer too, instead of showing a disconnected Devbar.
+      if (window.webContents.getURL().includes('/devbar.html')) reload(false)
+      return { ok: false as const, error: 'start_failed' as const, config: result.config }
+    }
+    reload(input.enabled)
+    return { ok: true as const, config: result.config }
   }
 
   @IpcMethod()
@@ -287,8 +359,8 @@ export class AppIpc extends IpcService {
     }
     try {
       await access(targetPath)
-    } catch {
-      return { revealed: false as const, error: 'not_found' }
+    } catch (error) {
+      return { revealed: false as const, error: localFileActionError(error) }
     }
     shell.showItemInFolder(targetPath)
     return { revealed: true as const }
@@ -309,8 +381,8 @@ export class AppIpc extends IpcService {
     }
     try {
       await access(targetPath)
-    } catch {
-      return { opened: false as const, error: 'not_found' }
+    } catch (error) {
+      return { opened: false as const, error: localFileActionError(error) }
     }
     // `shell.openPath` resolves to '' on success and to the failure message
     // otherwise; it never rejects.

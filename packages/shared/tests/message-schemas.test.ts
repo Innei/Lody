@@ -189,6 +189,26 @@ describe('message-schemas session steer', () => {
         type: 'session/steer_response',
         sessionId: 'session-1',
         userTurnId: 'user-2',
+        applied: false,
+        disposition: 'delivery-unknown',
+      }).success
+    ).toBe(true);
+    expect(
+      SessionSteerResponseSchema.safeParse({
+        type: 'session/steer_response',
+        sessionId: 'session-1',
+        userTurnId: 'user-2',
+        applied: false,
+        disposition: 'promotion-failed',
+        recoveryOwned: true,
+        error: 'Activation write failed',
+      }).success
+    ).toBe(true);
+    expect(
+      SessionSteerResponseSchema.safeParse({
+        type: 'session/steer_response',
+        sessionId: 'session-1',
+        userTurnId: 'user-2',
         accepted: true,
         disposition: 'accepted',
       }).success
@@ -895,7 +915,6 @@ describe('normalizeSessionTurnInputConfig', () => {
       },
       resume: 'acp-1',
       inputBlocks: [{ type: 'text', text: 'hello' }],
-      taskToolsEnabled: false,
       issuePRMentions: 'invalid',
     });
 
@@ -909,7 +928,6 @@ describe('normalizeSessionTurnInputConfig', () => {
       },
       resume: 'acp-1',
       inputBlocks: [{ type: 'text', text: 'hello' }],
-      taskToolsEnabled: false,
     });
   });
 });

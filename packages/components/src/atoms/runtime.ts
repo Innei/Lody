@@ -1,7 +1,9 @@
 import type { LocalFilePreviewResource } from '@lody/shared/local-file-preview';
+import type { SessionData } from '@lody/shared/session-data';
 import { atom } from 'jotai';
 import type { LoroDoc } from 'loro-crdt';
 import type { LoroRepo } from 'loro-repo';
+import type { ConversationView } from '@/lib/conversation-view';
 import type {
   InferInputType,
   InferType,
@@ -17,12 +19,13 @@ import type {
   SessionPrepareCancelResponse,
   SessionPrepareResponse,
   SessionSteerResponse,
+  SessionGoalAction,
+  SessionGoalResponse,
   SessionDocMeta,
   SessionTurnInputConfig,
   SessionId,
-  TaskId,
-  TaskDocInput,
-  TaskDocState,
+  SessionMeta,
+  SessionOperation,
   MachineId,
   MachinePingResponse,
   MachineRestartResponse,
@@ -73,16 +76,24 @@ import { readStoredAuthToken } from '@/lib/auth-bootstrap';
 import type { RoomSyncState } from '@/lib/room-sync-state';
 import { currentWorkspaceIdAtom, currentWorkspaceSlugAtom } from './workspace-context';
 
-export type SessionDocState = InferType<typeof sessionDocSchema>;
-export type SessionDocInput = InferInputType<typeof sessionDocSchema>;
+/**
+ * Control-plane state of a session doc. `history` is deliberately absent: the
+ * renderer reads turns through `SessionDocStore.history` (a `ConversationView`)
+ * and writes them through `SessionDocStore.sessionData.commands`, so opening a long
+ * conversation never materializes the whole list.
+ */
+export type SessionDocState = Omit<InferType<typeof sessionDocSchema>, 'history'>;
+export type SessionDocInput = Omit<InferInputType<typeof sessionDocSchema>, 'history'>;
+/** The draft `setState` updaters receive; history is not writable through it. */
+export type SessionDocDraft = Omit<SessionDocMeta, 'history'>;
 export type PreviewVisualCommentDocState = InferType<typeof previewVisualCommentDocSchema>;
 export type PreviewVisualCommentDocInput = InferInputType<typeof previewVisualCommentDocSchema>;
 
 export type SessionDocUpdater =
-  | Partial<SessionDocMeta>
+  | Partial<SessionDocDraft>
   | Partial<SessionDocInput>
-  | ((state: SessionDocMeta) => void)
-  | ((state: Readonly<SessionDocMeta>) => SessionDocMeta)
+  | ((state: SessionDocDraft) => void)
+  | ((state: Readonly<SessionDocDraft>) => SessionDocDraft)
   | ((state: Readonly<SessionDocInput>) => SessionDocInput);
 
 export type SessionDocStore = {
@@ -96,6 +107,10 @@ export type SessionDocStore = {
   getState: () => SessionDocState;
   setState: (updater: SessionDocUpdater) => void;
   subscribe: (listener: (state: SessionDocState) => void) => () => void;
+  /** Windowed read access to the session's turns; see `lib/conversation-view`. */
+  readonly history: ConversationView;
+  /** CRDT-neutral history reads, commands and stored-copy capabilities. */
+  readonly sessionData: SessionData;
   dispose: () => void;
   /**
    * Resolves when all pending local CRDT changes have been flushed to the server.
@@ -127,25 +142,6 @@ export type PreviewVisualCommentDocStore = {
   waitUntilSynced: () => Promise<void>;
 };
 
-export type TaskDocUpdater =
-  | Partial<TaskDocInput>
-  | ((state: Readonly<TaskDocInput>) => TaskDocInput)
-  | ((state: TaskDocInput) => void);
-
-export type TaskDocStore = {
-  readonly taskId: TaskId;
-  readonly roomId: string;
-  readonly doc: LoroDoc;
-  readonly firstSynced: Promise<void>;
-  getSyncState: () => RoomSyncState;
-  subscribeSyncState: (listener: (state: RoomSyncState) => void) => () => void;
-  getState: () => TaskDocState;
-  setState: (updater: TaskDocUpdater) => void;
-  subscribe: (listener: (state: TaskDocState) => void) => () => void;
-  dispose: () => void;
-  waitUntilSynced: () => Promise<void>;
-};
-
 export type WorkspaceRuntime = {
   /**
    * The workspace slug used for caching the (slug, id) mapping.
@@ -156,6 +152,11 @@ export type WorkspaceRuntime = {
    */
   readonly workspaceId: WorkspaceId;
   readonly repo: LoroRepo;
+  /** Read targets from the ready metadata source, independently of UI projection. */
+  readSessionOperationTargets: (
+    sessionId: SessionId,
+    operation: SessionOperation
+  ) => Promise<[SessionMeta, ...SessionMeta[]]>;
   /** Workspace-owned, scoped LRU for owner-session file-index Flock resources. */
   readonly codeCollabFileIndexCache: CodeCollabFileIndexCache;
   /**
@@ -208,10 +209,6 @@ export type WorkspaceRuntime = {
   releasePreviewVisualCommentStore: (sessionId: SessionId) => Promise<void>;
   acquirePreviewVisualCommentStore: (sessionId: SessionId) => Promise<PreviewVisualCommentDocStore>;
   releasePreviewVisualCommentStoreRef: (sessionId: SessionId) => void;
-  withTaskStore: <T>(taskId: TaskId, fn: (store: TaskDocStore) => Promise<T> | T) => Promise<T>;
-  releaseTaskStore: (taskId: TaskId) => Promise<void>;
-  acquireTaskStore: (taskId: TaskId) => Promise<TaskDocStore>;
-  releaseTaskStoreRef: (taskId: TaskId) => void;
   sendControl: (message: ClientToServer) => void;
   waitForSessionCreateResponse: (
     sessionId: SessionId,
@@ -285,7 +282,7 @@ export type WorkspaceRuntime = {
     machineId: MachineId,
     sessionId: SessionId,
     turnId: string,
-    options?: { timeoutMs?: number }
+    options?: { timeoutMs?: number; subagentTaskId?: string }
   ) => Promise<SessionCancelResponse | null>;
   requestSessionSteer: (
     machineId: MachineId,
@@ -299,6 +296,16 @@ export type WorkspaceRuntime = {
     },
     options?: { timeoutMs?: number }
   ) => Promise<SessionSteerResponse | null>;
+  requestSessionGoal: (
+    machineId: MachineId,
+    args: {
+      sessionId: SessionId;
+      action: SessionGoalAction;
+      objective?: string;
+      userId: string;
+    },
+    options?: { timeoutMs?: number }
+  ) => Promise<SessionGoalResponse | null>;
   requestSessionTerminate: (
     machineId: MachineId,
     sessionId: SessionId,

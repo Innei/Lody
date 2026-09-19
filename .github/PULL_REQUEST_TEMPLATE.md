@@ -59,35 +59,46 @@ Any supporting artifact must be reachable by reviewers; a local HTML file is not
 
 <!--
 Required for every fork-based pull request. Give maintainers and their reviewing
-agents the minimum public context needed to assess scope, intent, and risk.
-Every field must contain a concise, meaningful summary; N/A and redacted answers
-are not accepted. Never paste private transcripts, secrets, or tool logs.
+agents the minimum public context needed to assess intent and risk. N/A and
+redacted answers are not accepted. Never paste private transcripts, secrets, or
+tool logs; link a published shared conversation instead of copying its text.
 -->
 
 <!-- context-handoff:begin -->
 
-### Instructions for reviewing agents
+### Original user prompt
 
 <!--
-Required and PR-specific. The authoring Agent writes this handoff for the
-organization owners' reviewing Agent. Do not paste a generic review checklist.
-Keep each item to one concise sentence and the whole section under 1,200
-characters. Include only the highest-value files, decisions, risks, and gaps.
+Required only for fork-based/external pull requests. Same-repository maintainer
+branches do not need to provide an original user prompt.
+
+For external PRs, preserve the triggering user's prompt as source evidence for
+review. Paste it verbatim: do not summarize, rewrite, clean up, or translate it.
+If the prompt contains secrets or private material that cannot be published,
+redact only those spans and leave an explicit marker in their place. Do not append
+unrelated transcript turns, tool logs, or attachment bytes.
 -->
 
-- **Review focus:** <!-- Which concrete files or flows deserve attention, and why? -->
-- **Decisions to challenge:** <!-- Which deliberate choices need independent judgment? -->
-- **Plausible failures / evidence gaps:** <!-- What material breakage or uncertainty remains? -->
+<details>
+<summary>Show original prompt</summary>
 
-### Authoring context
+````text
+<!-- Paste the triggering user's original prompt here, verbatim. -->
+````
 
-<!-- Fill every field with a public summary. Explain briefly when there is no applicable risk or omission. -->
+</details>
 
-- **User goal / directives:** <!-- Concise paraphrase only; never paste transcripts or tool logs. -->
-- **Constraints / non-goals:** <!-- What must not change or is out of scope. -->
-- **Risk-bearing decisions:** <!-- Decisions affecting data, authority, compatibility, or recovery. -->
-- **Destructive or irreversible behavior:** <!-- Include cleanup, overwrite, migration, rollback, and failure recovery. -->
-- **Deliberately not done or tested:** <!-- Intentional omissions and why they are acceptable. -->
-- **Unknowns / confidence:** <!-- Residual risk and confidence in the change. -->
+### Shared conversation
+
+<!--
+Optional. If the authoring conversation was published as a shared Lody
+conversation, paste the public link here so reviewers can inspect the complete
+authoring context the summary omits. Otherwise delete this section entirely.
+
+An Agent asks its user to publish the conversation before opening the pull
+request and pastes the returned public link here. Publication needs the user's
+confirmation in the app; the Agent requests it but never approves it and never
+invents a URL.
+-->
 
 <!-- context-handoff:end -->
