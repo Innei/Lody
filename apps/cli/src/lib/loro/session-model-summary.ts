@@ -17,8 +17,8 @@ type AssistantLike = {
 function projectAssistantModel(
   entry: AssistantLike | undefined
 ): SessionMeta['lastModel'] | undefined {
-  if (entry?.role !== 'assistant') return;
-  if (!entry.items?.length && !entry.plan?.length) return;
+  if (entry?.role !== 'assistant') return undefined;
+  if (!entry.items?.length && !entry.plan?.length) return undefined;
   const value = entry.modelInfo;
   const model = (
     value && typeof value === 'object' && !Array.isArray(value) ? value : {}
