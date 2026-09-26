@@ -51,7 +51,10 @@ code in exchange for smooth streaming and a static path with no animation cost.
 - `@lobehub/streamdown` completes the open tail with `remend`'s defaults, whose
   HTML-tag step drops everything after a TeX comparison such as `p<q`
   ([earlier fix](../bug-fix/2026-09-20-streamdown-math-document-truncation.md)).
-  A pnpm patch passes `{ htmlTags: false }`, as the old renderer did.
+  `@lobehub/streamdown` 1.4.0 added a `remend` option for this
+  ([lobehub/streamdown#5](https://github.com/lobehub/streamdown/pull/5)); the
+  renderer passes `{ htmlTags: false }`, as the old renderer did. 1.4.0 is
+  listed in `minimumReleaseAgeExclude` because it was adopted on release day.
 - A remark plugin marks unclosed fences so a streaming fence reports
   `data-incomplete`; an unclosed Mermaid fence stays an ordinary code block until
   it closes instead of re-rendering the diagram on every commit.
@@ -70,7 +73,7 @@ code in exchange for smooth streaming and a static path with no animation cost.
 
 - `tests/markdown-streaming-reparse.test.ts` covers the streaming-to-static
   handoff, fence completeness, raw-HTML escaping, autolink repair on both paths,
-  and the `p<q` math tail while streaming (fails without the patch); `tests/markdown-mermaid-fullscreen.test.tsx` passes unchanged against
+  and the `p<q` math tail while streaming (fails without the `remend` option); `tests/markdown-mermaid-fullscreen.test.tsx` passes unchanged against
   the new block markup.
 - Checked in Storybook: code highlighting, tables, KaTeX, Mermaid actions and
   download menu, and the streaming demo (fade spans only while streaming, none

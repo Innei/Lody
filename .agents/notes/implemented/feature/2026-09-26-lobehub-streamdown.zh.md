@@ -38,7 +38,10 @@ UI，流式文本按原始分块直接出现。现改为 `@lobehub/streamdown`�
   高亮缓存，避免挤掉已完成的代码块。
 - `@lobehub/streamdown` 用 `remend` 默认选项补全尾部，其 HTML 标签步骤会丢弃 `p<q` 这类
   TeX 比较符之后的全部内容（[之前的修复](../bug-fix/2026-09-20-streamdown-math-document-truncation.zh.md)）。
-  通过 pnpm 补丁传入 `{ htmlTags: false }`，与旧渲染器一致。
+  `@lobehub/streamdown` 1.4.0 为此新增了 `remend` 选项
+  （[lobehub/streamdown#5](https://github.com/lobehub/streamdown/pull/5)），渲染器传入
+  `{ htmlTags: false }`，与旧渲染器一致。由于在发布当天采用，1.4.0 被列入
+  `minimumReleaseAgeExclude`。
 - 一个 remark 插件标记未闭合的代码围栏，使流式中的围栏带有 `data-incomplete`；未闭合的
   Mermaid 围栏在闭合前保持普通代码块，而不是每次提交都重新渲染图表。
 - 数学公式直接使用 `remark-math` 和 `rehype-katex`，选项与 `@streamdown/math` 相同。
@@ -53,7 +56,7 @@ UI，流式文本按原始分块直接出现。现改为 `@lobehub/streamdown`�
 ## 验证与限制
 
 - `tests/markdown-streaming-reparse.test.ts` 覆盖流式到静态的交接、围栏闭合判断、原始
-  HTML 转义、两条路径上的自动链接修复，以及流式中 `p<q` 数学公式之后的内容（去掉补丁即失败）；`tests/markdown-mermaid-fullscreen.test.tsx`
+  HTML 转义、两条路径上的自动链接修复，以及流式中 `p<q` 数学公式之后的内容（去掉 `remend` 选项即失败）；`tests/markdown-mermaid-fullscreen.test.tsx`
   在新的区块结构下原样通过。
 - 已在 Storybook 中检查：代码高亮、表格、KaTeX、Mermaid 操作栏和下载菜单，以及流式演示
   （仅在流式时有淡入 span，交接后为零）。

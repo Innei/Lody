@@ -694,6 +694,11 @@ const HTML_MARKDOWN_REHYPE_PLUGINS = [rehypeRaw, rehypeSanitize, KATEX_REHYPE_PL
 
 const STREAMING_HANDOFF_DELAY_MS = 1000;
 
+// Remend reads `<q` in a formula such as `p<q` as an unfinished HTML tag and
+// drops the rest of the stream. Raw HTML is opt-in and sanitized, so tags are
+// left to the Markdown parser.
+const STREAMING_REMEND_OPTIONS = { htmlTags: false };
+
 // The engine is loaded only for a turn that is streaming. Its bundle carries
 // lookbehind regex literals, a parse error in Safari < 16.4, so a failed load
 // falls back to rendering the stream statically instead of breaking the turn.
@@ -701,8 +706,21 @@ const StreamingMarkdown = lazy<ComponentType<StreamdownProps>>(() =>
   import('@lobehub/streamdown').then(
     ({ Streamdown }) => ({ default: Streamdown }),
     () => ({
-      default: ({ content, ...options }: StreamdownProps) => (
-        <Markdown {...options}>{content}</Markdown>
+      default: ({
+        content,
+        components,
+        remarkPlugins,
+        rehypePlugins,
+        urlTransform,
+      }: StreamdownProps) => (
+        <Markdown
+          components={components}
+          remarkPlugins={remarkPlugins}
+          rehypePlugins={rehypePlugins}
+          urlTransform={urlTransform}
+        >
+          {content}
+        </Markdown>
       ),
     })
   )
@@ -728,7 +746,7 @@ const readCodeElement = (pre: HastElement | undefined) => {
   return {
     code: code.children.map((child) => (child.type === 'text' ? child.value : '')).join(''),
     language: language || 'text',
-    meta: code.data?.meta ?? undefined,
+    meta: (code.data as { meta?: string | null } | undefined)?.meta ?? undefined,
     isIncomplete: code.properties.dataIncomplete === true,
   };
 };
@@ -1318,6 +1336,7 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
           <Suspense fallback={staticMarkdown}>
             <StreamingMarkdown
               content={normalizedText}
+              remend={STREAMING_REMEND_OPTIONS}
               components={components}
               remarkPlugins={MARKDOWN_REMARK_PLUGINS}
               rehypePlugins={rehypePlugins}

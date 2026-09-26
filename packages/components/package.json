@@ -92,7 +92,7 @@
     "@fontsource/inter": "^5.2.8",
     "@fontsource/jetbrains-mono": "^5.2.8",
     "@hookform/resolvers": "^5.1.1",
-    "@lobehub/streamdown": "^1.3.1",
+    "@lobehub/streamdown": "^1.4.0",
     "@lody/cloud-api": "workspace:*",
     "@lody/loro-streams-rpc": "workspace:*",
     "@lody/platform": "workspace:*",
