@@ -1,3 +1,4 @@
+import { makeDesktopKeyMaintenance } from './e2ee-key-maintenance.mjs'
 import { rememberDesktopE2eeFailure } from './e2ee-diagnostics.mjs'
 import { randomUUID } from 'node:crypto'
 import { makeDesktopPersonalPairing } from './e2ee-personal-pairing.mjs'
@@ -11,7 +12,6 @@ import {
   KeyDistributor,
   KeyReceiver,
   KeyRepair,
-  runWorkspaceKeyRound,
   InstalledEpochHistory,
   InstalledEpochKeys,
   InstalledKeyError,
@@ -589,7 +589,7 @@ export const makeDesktopE2eeRuntimeHost = Effect.fn('DesktopE2eeRuntimeHost.open
         // insertIfAbsent preserves the creation's original protected key; never repair it.
         if (creation.epochBlob) {
           yield* installedStore.insertIfAbsent(0, creation.epochBlob)
-          if (!pending((yield* feed.current()).view)) yield* keys.check(0)
+          // Key health cannot prevent opening the independently verified ledger.
         }
         const historyContext = yield* Layer.buildWithScope(
           InstalledEpochHistory.layer.pipe(
@@ -599,6 +599,7 @@ export const makeDesktopE2eeRuntimeHost = Effect.fn('DesktopE2eeRuntimeHost.open
           scope
         )
         let maintenance: Context.Context<KeyDistributor | KeyReceiver | KeyRepair> | undefined
+        let maintainKeys: Effect.Success<ReturnType<typeof makeDesktopKeyMaintenance>> | undefined
         let round: Deferred.Deferred<void, unknown> | undefined
         let roundAgain = false
         let closing = false
@@ -706,13 +707,13 @@ export const makeDesktopE2eeRuntimeHost = Effect.fn('DesktopE2eeRuntimeHost.open
                     scope
                   )
                 }
+                let passes = 0
                 do {
                   roundAgain = false
                   const view = yield* verified.current()
                   const epoch = view.inspectState().epoch.number
                   const checked = yield* Effect.result(keys.check(epoch))
                   if (staging && epoch > 0 && Result.isFailure(checked)) {
-                    if (checked.failure.reason !== 'missing-key') return yield* checked.failure
                     const located = getCommittedEpochStagingKey(view, epoch)
                     // A snapshot-joined device without this publication original uses mailbox/history.
                     if (Result.isSuccess(located)) {
@@ -729,8 +730,11 @@ export const makeDesktopE2eeRuntimeHost = Effect.fn('DesktopE2eeRuntimeHost.open
                     } else if (view.verification !== 'endorsed-snapshot')
                       return yield* located.failure
                   }
-                  yield* runWorkspaceKeyRound().pipe(Effect.provide(maintenance))
-                } while (roundAgain && !isClosing())
+                  maintainKeys ??= yield* makeDesktopKeyMaintenance().pipe(
+                    Effect.provide(maintenance)
+                  )
+                  yield* maintainKeys(epoch)
+                } while (roundAgain && ++passes < 4 && !isClosing())
                 return undefined
               })
             )
@@ -804,13 +808,21 @@ export const makeDesktopE2eeRuntimeHost = Effect.fn('DesktopE2eeRuntimeHost.open
           const saved = yield* Effect.fromResult(exportVerifiedState(state.view))
           const ownDevice = publicState.devices.get(hex(device.publicKey.toBytes()))
           const continuityPending = pending(state.view)
+          if (!continuityPending) yield* verified.current()
           const checked = continuityPending
             ? Result.fail(new InstalledKeyError({ reason: 'missing-key' }))
             : yield* Effect.result(keys.check(publicState.epoch.number))
           if (
             Result.isFailure(checked) &&
             checked.failure.reason !== 'missing-key' &&
-            checked.failure.reason !== 'unauthorized'
+            checked.failure.reason !== 'unauthorized' &&
+            ![
+              'corrupt',
+              'native-failed',
+              'binding-mismatch',
+              'commitment-mismatch',
+              'storage'
+            ].includes(checked.failure.reason)
           )
             return yield* checked.failure
           let writeEpoch: number | null = Result.isSuccess(checked)
@@ -819,7 +831,7 @@ export const makeDesktopE2eeRuntimeHost = Effect.fn('DesktopE2eeRuntimeHost.open
           if (
             !continuityPending &&
             Result.isFailure(checked) &&
-            checked.failure.reason === 'missing-key'
+            checked.failure.reason !== 'unauthorized'
           ) {
             for (
               let candidate = retainedWriteEpoch ?? publicState.epoch.number - 1;
@@ -832,7 +844,8 @@ export const makeDesktopE2eeRuntimeHost = Effect.fn('DesktopE2eeRuntimeHost.open
                 break
               }
               if (older.failure.reason === 'unauthorized') break
-              if (older.failure.reason !== 'missing-key') return yield* older.failure
+              if (older.failure.reason === 'closed' || older.failure.reason === 'rollback')
+                return yield* older.failure
             }
           }
           if (writeEpoch !== null) retainedWriteEpoch = writeEpoch
