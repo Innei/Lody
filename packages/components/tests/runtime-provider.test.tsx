@@ -1,5 +1,5 @@
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
-import { encryptedLocalNamespace, retainEncryptedLocalIdentity } from '../src/lib/e2ee-local-data';
+import { encryptedLocalNamespace, retainEncryptedLocalIdentity, readEncryptedLocalIdentity } from '../src/lib/e2ee-local-data';
 import { resumeEncryptedWorkspaceCleanup } from '../src/lib/e2ee-member-removal';
 import { notifyE2eeLedgerChanged } from '../src/providers/e2ee-runtime-notifications';
 // @vitest-environment jsdom
@@ -240,6 +240,28 @@ describe('RuntimeProvider warm workspace preparation', () => {
       cryptoOrgId: '11'.repeat(32),
       activation: 'control-only',
     }) as const;
+
+  it('opens a re-invited member under the new device instance while retaining exact local identity', async () => {
+    ordinaryCloud();
+    listEncrypted();
+    const original = {accountId: 'local:user', workspaceId: 'local:workspace', genesisHash: '11'.repeat(32), signingPublicKey: '22'.repeat(32)};
+    retainEncryptedLocalIdentity(original);
+    const installed = {...original, signingPublicKey: '33'.repeat(32)};
+    const status = {...installed, epoch: 0, hasCurrentKey: true, rotationRequired: false};
+    environment.e2eeWorkspaces!.describe = async () => encryptedDescriptor(original.workspaceId);
+    environment.e2eeWorkspaces!.runtime = {
+      open: async () => status,
+      status: async () => status,
+      refresh: async () => status,
+      close: async () => {},
+    } as unknown as E2eeWorkspaceRuntime;
+    await render();
+    expect(store.get(runtimeAtom)).toBe(prepared);
+    const options = vi.mocked(createWorkspaceRuntime).mock.calls.at(-1)?.[0];
+    expect(options?.e2eeLocalIdentity).toEqual(installed);
+    expect(readEncryptedLocalIdentity(original.accountId, original.workspaceId)).toEqual(installed);
+    expect(encryptedLocalNamespace({...installed, windowId: 'test-window'})).not.toBe(encryptedLocalNamespace({...original, windowId: 'test-window'}));
+  });
 
   it.each(['success', 'temporary failure'])(
     'keeps the local replica and resumes or offers retry after background refresh %s',

@@ -68,6 +68,8 @@ export interface E2eeRuntimeStatus {
   readonly position: string | null;
   readonly epoch: number;
   readonly rotationRequired: boolean;
+  /** Ephemeral main-process reader owner; never persisted or an authorization credential. */
+  readonly readerOwner?: string;
   /** Current self membership, derived only from the host's verified ledger. */
   readonly signingPublicKey?: string;
   readonly membershipId?: string | null;
@@ -117,6 +119,33 @@ export interface E2eeWorkspaceRuntime {
     membershipId: string,
     role: 'admin' | 'member'
   ): Promise<void>;
+  /** Create public email/link pins using a current manager's native device. */
+  createMemberInvitation?(input: {
+    workspaceId: string;
+    mode: 'email' | 'link';
+    email?: string;
+  }): Promise<import('@lody/cloud-api').E2eeMemberOffer>;
+  prepareMemberJoin?(
+    offer: import('@lody/cloud-api').E2eeMemberOffer
+  ): Promise<import('@lody/cloud-api').E2eeMemberRequest>;
+  pendingMemberJoin?(
+    workspaceId: string
+  ): Promise<{ offer: import('@lody/cloud-api').E2eeMemberOffer; requestId: string | null } | null>;
+  memberJoinRequests?(
+    workspaceId: string
+  ): Promise<import('@lody/cloud-api').E2eeMemberReplies['pending']>;
+  /** Automatic mode is permitted only for an accepted, targeted email invitation. */
+  approveMemberJoin?(
+    workspaceId: string,
+    requestId: string,
+    mode: 'automatic' | 'explicit'
+  ): Promise<{ admitted: boolean; keyPending: boolean }>;
+  rejectMemberJoin?(workspaceId: string, requestId: string): Promise<{ state: 'rejected' }>;
+  revokeMemberInvitation?(workspaceId: string, token: string): Promise<{ revoked: true }>;
+  claimMemberJoin?(
+    workspaceId: string,
+    requestId: string
+  ): Promise<{ ready: boolean; state: string }>;
   personalPairingOffer?(workspaceId: string): Promise<E2eePersonalPairingOffer>;
   preparePersonalJoin?(
     offer: E2eePersonalPairingOffer
@@ -207,9 +236,10 @@ export interface E2eeWorkspaceRuntime {
   }): Promise<void>;
   open(
     workspaceId: string,
-    observed?: { genesisHash: string; headHash: string; length: number }
+    observed?: { genesisHash: string; headHash: string; length: number },
+    expectedAccountId?: string
   ): Promise<E2eeRuntimeStatus>;
-  close(workspaceId: string): Promise<void>;
+  close(workspaceId: string, expectedAccountId?: string, readerOwner?: string): Promise<void>;
   /** Read retained verified identity without granting this window a reader.
    * The host binds the expected account and releases its temporary read before
    * returning. Missing on older hosts; callers must not fall back to status. */

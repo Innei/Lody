@@ -2,6 +2,8 @@ import { rm } from 'node:fs/promises'
 import { rememberDesktopE2eeFailure } from './e2ee-diagnostics.mjs'
 import { createHash, randomBytes } from 'node:crypto'
 import { makeDesktopPersonalJoins, type PersonalPairingOffer } from './e2ee-personal-pairing.mjs'
+import { makeDesktopMemberJoins } from './e2ee-member-join.mjs'
+import type { E2eeMemberOffer, E2eeWorkspaceHistoryPage } from '@lody/cloud-api'
 import { constants } from 'node:fs'
 import { lstat, mkdir, open, link, unlink, readdir } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
@@ -431,6 +433,7 @@ export const makeDesktopE2eeBootstrap = Effect.fn('DesktopE2eeBootstrap.open')(f
     })
 
   const joins = yield* withLock(sql(() => makeDesktopPersonalJoins({ db, custody })))
+  const memberJoins = yield* withLock(sql(() => makeDesktopMemberJoins({ db, custody })))
 
   const load = (requestId: string) => {
     const value = db
@@ -712,7 +715,12 @@ export const makeDesktopE2eeBootstrap = Effect.fn('DesktopE2eeBootstrap.open')(f
             invitation: undefined
           }
         })
-        return creation ?? (yield* joins.origin(workspaceId))
+        return (
+          creation ??
+          ((yield* memberJoins.has(workspaceId))
+            ? yield* memberJoins.origin(workspaceId)
+            : yield* joins.origin(workspaceId))
+        )
       })
     )
   const removedRow = (workspaceId: string) =>
@@ -749,6 +757,8 @@ export const makeDesktopE2eeBootstrap = Effect.fn('DesktopE2eeBootstrap.open')(f
         }
         db.prepare('DELETE FROM personal_joins WHERE workspace_id=?').run(workspaceId)
         db.prepare('DELETE FROM retired_personal_joins WHERE workspace_id=?').run(workspaceId)
+        db.prepare('DELETE FROM personal_join_histories WHERE workspace_id=?').run(workspaceId)
+        db.prepare('DELETE FROM member_joins WHERE workspace_id=?').run(workspaceId)
         db.exec('COMMIT')
       } catch (cause) {
         db.exec('ROLLBACK')
@@ -803,6 +813,32 @@ export const makeDesktopE2eeBootstrap = Effect.fn('DesktopE2eeBootstrap.open')(f
       return false
     return yield* withLock(eraseRemoved(input.workspaceId))
   })
+  const acceptJoin = (
+    workspaceId: string,
+    accept: Effect.Effect<void, unknown>,
+    installedOrigin: Effect.Effect<{ genesisHash: string }, unknown>
+  ) =>
+    withLock(
+      Effect.gen(function* () {
+        yield* accept
+        // The origin verifies the admission and binds it to the actual retained device.
+        const origin = yield* installedOrigin
+        const genesis = yield* Effect.fromResult(
+          Bytes.genesisHash(Buffer.from(origin.genesisHash, 'hex'))
+        )
+        const device = yield* custody.openDevice(genesis)
+        yield* sql(() => {
+          const previous = removedRow(workspaceId)
+          if (
+            previous?.genesis === origin.genesisHash &&
+            previous.signing_key !== hex(device.publicKey.toBytes())
+          )
+            db.prepare(
+              'DELETE FROM removed_workspaces WHERE workspace_id=? AND genesis=? AND signing_key=?'
+            ).run(workspaceId, previous.genesis, previous.signing_key)
+        })
+      })
+    )
   return Object.freeze({
     recordRemovedWorkspace,
     hasRemovedWorkspace: (workspaceId: string) => sql(() => Boolean(removedRow(workspaceId))),
@@ -825,28 +861,31 @@ export const makeDesktopE2eeBootstrap = Effect.fn('DesktopE2eeBootstrap.open')(f
         })
       ),
     pendingPersonalJoin: (workspaceId: string) => withLock(joins.pending(workspaceId)),
+    pendingMemberJoin: (workspaceId: string) => withLock(memberJoins.pending(workspaceId)),
+    retireMemberJoin: (expected: Parameters<typeof memberJoins.retire>[0]) =>
+      withLock(memberJoins.retire(expected)),
+    memberJoinNeedsAccountIdentity: () => withLock(Effect.map(cachedIdentity, (id) => id === null)),
+    prepareMemberJoin: (offer: E2eeMemberOffer) =>
+      withLock(
+        Effect.gen(function* () {
+          const id = yield* cachedIdentity
+          if (!id) return yield* fail('account-identity-required')
+          return yield* memberJoins.prepare(offer, id)
+        })
+      ),
+    acceptMemberJoin: (workspaceId: string, pages: readonly E2eeWorkspaceHistoryPage[]) =>
+      acceptJoin(
+        workspaceId,
+        memberJoins.accept(workspaceId, pages),
+        memberJoins.origin(workspaceId)
+      ),
     retirePersonalJoin: (workspaceId: string, pairingSessionId: string) =>
       withLock(joins.retire(workspaceId, pairingSessionId)),
     preparePersonalJoin: (offer: PersonalPairingOffer) => withLock(joins.prepare(offer)),
     acceptPersonalJoin: (workspaceId: string, invitationHex: string) =>
-      withLock(
-        Effect.gen(function* () {
-          yield* joins.accept(workspaceId, invitationHex)
-          const origin = yield* joins.origin(workspaceId)
-          const genesis = yield* Effect.fromResult(
-            Bytes.genesisHash(Buffer.from(origin.genesisHash, 'hex'))
-          )
-          const device = yield* custody.openDevice(genesis)
-          yield* sql(() => {
-            const previous = removedRow(workspaceId)
-            if (
-              previous &&
-              previous.signing_key !== Buffer.from(device.publicKey.toBytes()).toString('hex')
-            )
-              db.prepare('DELETE FROM removed_workspaces WHERE workspace_id=?').run(workspaceId)
-          })
-        })
-      ),
+      acceptJoin(workspaceId, joins.accept(workspaceId, invitationHex), joins.origin(workspaceId)),
+    acceptPersonalHistory: (workspaceId: string, pages: readonly E2eeWorkspaceHistoryPage[]) =>
+      acceptJoin(workspaceId, joins.acceptHistory(workspaceId, pages), joins.origin(workspaceId)),
     prepareCreation: (input: DesktopE2eeCreationIntent) => withLock(prepare(input)),
     recordCreated,
     creationFor,

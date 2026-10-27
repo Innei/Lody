@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { E2eeMemberRemovedError } from '../../services/e2ee-cloud-errors.mjs'
 import { Effect } from 'effect'
 import { getIpcContext, IpcMethod, IpcService } from 'electron-ipc-decorator'
@@ -22,6 +23,8 @@ import { getIpcServiceDeps } from '../ipc-service-deps'
 import { PersonalPairingOfferSchema } from '../../services/e2ee-personal-pairing.mjs'
 import { LocalE2eeRecoveryFailureSchema } from '@lody/shared/e2ee-local-pairing'
 import type { E2eeJoinSession, E2eePersonalPairingOffer } from '@lody/cloud-api'
+import type { E2eeMemberOffer, E2eeWorkspaceHistoryPage } from '@lody/cloud-api'
+import { MemberOfferSchema, decodeMemberKeyPackage } from '../../services/e2ee-member-join.mjs'
 
 const observedSenders = new WeakSet<Electron.WebContents>()
 function pairingSession(value: string) {
@@ -49,6 +52,374 @@ export class E2eeIpc extends IpcService {
   // The decorator logs rejected errors. Retain only the latest local diagnostic
   // here, never on the cause-bearing Error passed to that logging/IPC boundary.
   private pairingFailure: unknown
+  private readonly readerOwners = new WeakMap<object, string>()
+  private readerOwner(owner: object) {
+    let id = this.readerOwners.get(owner)
+    if (!id) {
+      id = randomUUID()
+      this.readerOwners.set(owner, id)
+    }
+    return id
+  }
+  private memberScope(workspaceId: string) {
+    const auth = getIpcServiceDeps().authService
+    const identity = auth.getCachedSessionIdentity()
+    type Owner = Parameters<Parameters<typeof withDesktopE2eeAccount>[0]>[0]
+    let original: Owner | undefined
+    return <A>(work: (owner: Owner) => Effect.Effect<A, unknown>, create = false) =>
+      withDesktopE2eeAccount(
+        (owner) => {
+          const latest = auth.getCachedSessionIdentity()
+          if (
+            !identity.userId ||
+            owner.accountId !== identity.userId ||
+            latest.userId !== identity.userId ||
+            latest.generation !== identity.generation ||
+            (original && original !== owner)
+          )
+            return Effect.fail(new Error('e2ee_account_mismatch'))
+          original ??= owner
+          return work(owner)
+        },
+        workspaceId,
+        create
+      )
+  }
+  private async memberAccess(
+    workspaceId: string,
+    reader: number,
+    scope = this.memberScope(workspaceId)
+  ) {
+    return scope((owner) =>
+      Effect.gen(function* () {
+        if (!owner.readers.get(workspaceId)?.has(reader))
+          return yield* Effect.fail(new Error('e2ee_not_open'))
+        return {
+          accountId: owner.accountId,
+          workspaceId,
+          credential: yield* owner.bootstrap.deviceCredential(workspaceId),
+          status: yield* owner.host.status(workspaceId)
+        }
+      })
+    )
+  }
+  private memberResult<A>(
+    access: Awaited<ReturnType<E2eeIpc['memberAccess']>>,
+    request: Effect.Effect<A, unknown>
+  ) {
+    return Effect.runPromise(request).catch((error) => {
+      if (error instanceof E2eeMemberRemovedError) return this.removeLocalWorkspace(access)
+      throw error
+    })
+  }
+  private async permissionHistory(
+    workspaceId: string,
+    cloud: Awaited<ReturnType<typeof desktopE2eeCloudClient>>
+  ) {
+    const pages: E2eeWorkspaceHistoryPage[] = []
+    let cursor: string | undefined
+    for (let index = 0; index < 256; index++) {
+      const page = await Effect.runPromise(
+        cloud.client.history({
+          workspaceId,
+          ...(cursor ? { cursor } : {}),
+          ...(pages[0] ? { checkpoint: pages[0].checkpoint } : {})
+        })
+      )
+      pages.push(page)
+      if (page.nextCursor === null) return pages
+      cursor = page.nextCursor
+    }
+    throw new Error('e2ee_ledger_budget_exceeded')
+  }
+  @IpcMethod()
+  async createMemberInvitation(input: {
+    workspaceId: string
+    mode: 'email' | 'link'
+    email?: string
+  }) {
+    const id = sender()
+    const scope = this.memberScope(input.workspaceId)
+    if (input.mode !== 'email' && input.mode !== 'link') throw new Error('e2ee_invalid-input')
+    const access = await this.memberAccess(input.workspaceId, id, scope)
+    const cloud = await desktopE2eeCloudClient()
+    if (cloud.accountId !== access.accountId) throw new Error('e2ee_account_mismatch')
+    const offer = await scope((owner) =>
+      owner.accountId === access.accountId && owner.readers.get(input.workspaceId)?.has(id)
+        ? owner.host.memberOffer(input.workspaceId, input.mode, Date.now() + 48 * 60 * 60 * 1000)
+        : Effect.fail(new Error('e2ee_account_mismatch'))
+    )
+    const result = await this.memberResult(
+      access,
+      cloud.client.memberCreateInvitation({
+        ...access,
+        offer,
+        ...(input.email === undefined ? {} : { email: input.email })
+      })
+    )
+    if (
+      result.offer.workspaceId !== offer.workspaceId ||
+      result.offer.genesisHash !== offer.genesisHash
+    )
+      throw new Error('e2ee_conflict')
+    return result.offer
+  }
+  @IpcMethod()
+  async pendingMemberJoin(workspaceId: string) {
+    sender()
+    const scope = this.memberScope(workspaceId)
+    return scope((owner) =>
+      Effect.map(owner.bootstrap.pendingMemberJoin(workspaceId), (pending) =>
+        pending
+          ? {
+              offer: pending.offer,
+              requestId: pending.keyPackageHex
+                ? Buffer.from(
+                    decodeMemberKeyPackage(pending.keyPackageHex).request.requestId.toBytes()
+                  ).toString('hex')
+                : null
+            }
+          : null
+      )
+    ).catch((error) => {
+      if (error instanceof Error && error.message === 'e2ee_missing-binding') return null
+      throw error
+    })
+  }
+  @IpcMethod()
+  async prepareMemberJoin(source: E2eeMemberOffer) {
+    sender()
+    const offer = MemberOfferSchema.parse(source)
+    const scope = this.memberScope(offer.workspaceId)
+    const cloud = await desktopE2eeCloudClient()
+    const pending = await scope(
+      (owner) =>
+        owner.accountId === cloud.accountId
+          ? owner.bootstrap.pendingMemberJoin(offer.workspaceId)
+          : Effect.fail(new Error('e2ee_account_mismatch')),
+      true
+    )
+    if (pending && JSON.stringify(pending.offer) !== JSON.stringify(offer)) {
+      const retired = pending.keyPackageHex
+        ? await Effect.runPromise(
+            cloud.client.memberRetire({
+              token: pending.offer.token,
+              keyPackageHex: pending.keyPackageHex
+            })
+          )
+        : { state: 'cancelled' }
+      if (retired.state !== 'cancelled') throw new Error('e2ee_original_join_pending')
+      await scope((owner) =>
+        owner.accountId === cloud.accountId
+          ? owner.bootstrap.retireMemberJoin(pending)
+          : Effect.fail(new Error('e2ee_account_mismatch'))
+      )
+    }
+    const needsIdentity = await scope((owner) =>
+      owner.accountId === cloud.accountId
+        ? owner.bootstrap.memberJoinNeedsAccountIdentity()
+        : Effect.fail(new Error('e2ee_account_mismatch'))
+    )
+    if (needsIdentity) {
+      const identity = await Effect.runPromise(cloud.client.accountIdentity())
+      await scope((owner) =>
+        owner.accountId === cloud.accountId
+          ? owner.bootstrap.recordAccountIdentity({
+              accountId: cloud.accountId,
+              cryptoUserId: identity.cryptoUserId
+            })
+          : Effect.fail(new Error('e2ee_account_mismatch'))
+      )
+    }
+    const original = await scope((owner) =>
+      owner.accountId === cloud.accountId
+        ? owner.bootstrap.prepareMemberJoin(offer)
+        : Effect.fail(new Error('e2ee_account_mismatch'))
+    )
+    const result = await Effect.runPromise(
+      cloud.client.memberSubmit({ token: offer.token, keyPackageHex: original.keyPackageHex })
+    )
+    if (
+      result.accountId !== cloud.accountId ||
+      result.workspaceId !== offer.workspaceId ||
+      result.keyPackageHex !== original.keyPackageHex
+    )
+      throw new Error('e2ee_conflict')
+    return result
+  }
+  @IpcMethod()
+  async memberJoinRequests(workspaceId: string) {
+    const id = sender()
+    const scope = this.memberScope(workspaceId)
+    const access = await this.memberAccess(workspaceId, id, scope)
+    const cloud = await desktopE2eeCloudClient()
+    if (cloud.accountId !== access.accountId) throw new Error('e2ee_account_mismatch')
+    const result = await this.memberResult(access, cloud.client.memberPending(access))
+    const items: typeof result.items = []
+    for (const item of result.items) {
+      if (item.workspaceId !== workspaceId) throw new Error('e2ee_conflict')
+      try {
+        await scope((owner) =>
+          owner.accountId === access.accountId && owner.readers.get(workspaceId)?.has(id)
+            ? owner.host.inspectMemberAdmission(workspaceId, item.keyPackageHex)
+            : Effect.fail(new Error('e2ee_account_mismatch'))
+        )
+        items.push(item)
+      } catch (cause) {
+        // One malformed or stale applicant never suppresses other requests.
+        this.pairingFailure = cause
+      }
+    }
+    return { ...result, items }
+  }
+  @IpcMethod()
+  async approveMemberJoin(workspaceId: string, requestId: string, mode: 'automatic' | 'explicit') {
+    const id = sender()
+    const scope = this.memberScope(workspaceId)
+    if (mode !== 'automatic' && mode !== 'explicit') throw new Error('e2ee_invalid-input')
+    const access = await this.memberAccess(workspaceId, id, scope)
+    const cloud = await desktopE2eeCloudClient()
+    if (cloud.accountId !== access.accountId) throw new Error('e2ee_account_mismatch')
+    const material = await this.memberResult(
+      access,
+      cloud.client.memberRead({ ...access, requestId })
+    )
+    if (
+      material.workspaceId !== workspaceId ||
+      material.requestId !== requestId ||
+      (mode === 'automatic' && material.source !== 'email')
+    )
+      throw new Error('e2ee_conflict')
+    const pending = await scope((owner) =>
+      owner.accountId === access.accountId && owner.readers.get(workspaceId)?.has(id)
+        ? owner.host.prepareMemberAdmission(workspaceId, material.keyPackageHex)
+        : Effect.fail(new Error('e2ee_account_mismatch'))
+    )
+    let primary: unknown
+    if (pending) {
+      try {
+        await Effect.runPromise(cloud.client.appendRecord(pending))
+      } catch (cause) {
+        if (cause instanceof E2eeMemberRemovedError) return this.removeLocalWorkspace(access)
+        primary = cause
+      }
+    }
+    // A lost ACK is reconciled from genuine ledger history, never by signing again.
+    try {
+      await this.refresh(workspaceId)
+    } catch (cause) {
+      this.pairingFailure = cause
+    }
+    const result = await this.memberResult(
+      access,
+      cloud.client.memberRead({ ...access, requestId })
+    )
+    if (result.state !== 'committed') {
+      this.pairingFailure = primary
+      return { admitted: false, keyPending: true }
+    }
+    // refresh drives existing all-device mailbox delivery. Its failure cannot undo admission.
+    return { admitted: true, keyPending: true }
+  }
+  @IpcMethod()
+  async rejectMemberJoin(workspaceId: string, requestId: string) {
+    const access = await this.memberAccess(workspaceId, sender())
+    const cloud = await desktopE2eeCloudClient()
+    if (cloud.accountId !== access.accountId) throw new Error('e2ee_account_mismatch')
+    return this.memberResult(access, cloud.client.memberReject({ ...access, requestId }))
+  }
+  @IpcMethod()
+  async revokeMemberInvitation(workspaceId: string, token: string) {
+    const access = await this.memberAccess(workspaceId, sender())
+    const cloud = await desktopE2eeCloudClient()
+    if (cloud.accountId !== access.accountId) throw new Error('e2ee_account_mismatch')
+    return this.memberResult(access, cloud.client.memberRevoke({ ...access, token }))
+  }
+  @IpcMethod()
+  async claimMemberJoin(workspaceId: string, requestId: string) {
+    const reader = sender()
+    const scope = this.memberScope(workspaceId)
+    await scope(() => Effect.void)
+    const cloud = await desktopE2eeCloudClient()
+    const result = await Effect.runPromise(cloud.client.memberClaim({ workspaceId, requestId }))
+    if (
+      result.accountId !== cloud.accountId ||
+      result.workspaceId !== workspaceId ||
+      result.requestId !== requestId
+    )
+      throw new Error('e2ee_conflict')
+    if (result.state !== 'committed') return { ready: false, state: result.state }
+    const pages = await this.permissionHistory(workspaceId, cloud)
+    await scope((owner) =>
+      owner.accountId === cloud.accountId
+        ? owner.bootstrap.acceptMemberJoin(workspaceId, pages)
+        : Effect.fail(new Error('e2ee_account_mismatch'))
+    )
+    const ready = await this.installMemberJoin(workspaceId, reader, scope, cloud, pages)
+    return { ready, state: 'committed' }
+  }
+  private async installMemberJoin(
+    workspaceId: string,
+    reader: number,
+    scope: ReturnType<E2eeIpc['memberScope']>,
+    cloud: Awaited<ReturnType<typeof desktopE2eeCloudClient>>,
+    pages: E2eeWorkspaceHistoryPage[]
+  ) {
+    await scope((owner) =>
+      Effect.gen(function* () {
+        yield* owner.host.open(workspaceId)
+        const readers = owner.readers.get(workspaceId) ?? new Map<number, number>()
+        readers.set(reader, (readers.get(reader) ?? 0) + 1)
+        owner.readers.set(workspaceId, readers)
+      })
+    )
+    try {
+      for (const page of pages)
+        await scope((owner) => owner.host.ingestLedgerRecords(workspaceId, page))
+      try {
+        const access = await this.memberAccess(workspaceId, reader, scope)
+        const work = await scope((owner) =>
+          Effect.succeed(
+            owner.host.keyRound(
+              workspaceId,
+              (signal) =>
+                cloud.client.mailbox({ workspaceId, credential: access.credential }, signal),
+              (signal) =>
+                cloud.client.staging({ workspaceId, credential: access.credential }, signal)
+            )
+          )
+        )
+        await runDesktopE2eeOperation(cloud.accountId, work).catch((cause) => {
+          if (cause instanceof E2eeMemberRemovedError) return this.removeLocalWorkspace(access)
+          throw cause
+        })
+      } catch (cause) {
+        if (cause instanceof Error && cause.message === 'e2ee_member_removed') throw cause
+        this.pairingFailure = cause
+      }
+      return (await scope((owner) => owner.host.status(workspaceId))).hasCurrentKey
+    } finally {
+      try {
+        const cleanup = await scope((owner) =>
+          Effect.gen(function* () {
+            const readers = owner.readers.get(workspaceId)
+            const count = readers?.get(reader) ?? 0
+            if (count > 1) readers!.set(reader, count - 1)
+            else readers?.delete(reader)
+            if (readers?.size === 0) {
+              const drain = yield* owner.host.beginCloseWorkspace(workspaceId)
+              owner.readers.delete(workspaceId)
+              return drain
+            }
+            return Effect.void
+          })
+        )
+        await runDesktopE2eeOperation(cloud.accountId, cleanup)
+      } catch (cause) {
+        this.pairingFailure = cause
+      }
+    }
+  }
   @IpcMethod()
   async account(options?: { token?: string }) {
     sender()
@@ -437,6 +808,7 @@ export class E2eeIpc extends IpcService {
       // eslint-disable-next-line preserve-caught-error
       throw new Error('e2ee_append_unconfirmed')
     }
+    if (invitation === null) return { admitted: true as const, invitationPublished: false }
     try {
       await Effect.runPromise(
         cloud.client.joinPublish({
@@ -476,11 +848,17 @@ export class E2eeIpc extends IpcService {
       })
       return { ready: false, status: 'conflict' }
     }
-    if (!result.invitationHex) return { ready: false, status: result.status }
+    if (!result.invitationHex && result.status !== 'admitted')
+      return { ready: false, status: result.status }
+    const history = result.invitationHex
+      ? undefined
+      : await this.permissionHistory(workspaceId, cloud)
     await withDesktopE2eeAccount(
       (owner) =>
         owner.accountId === cloud.accountId
-          ? owner.bootstrap.acceptPersonalJoin(workspaceId, result.invitationHex!)
+          ? result.invitationHex
+            ? owner.bootstrap.acceptPersonalJoin(workspaceId, result.invitationHex)
+            : owner.bootstrap.acceptPersonalHistory(workspaceId, history!)
           : Effect.fail(new Error('e2ee_account_mismatch')),
       workspaceId,
       false
@@ -1129,19 +1507,42 @@ export class E2eeIpc extends IpcService {
     return recordDesktopE2eeCreated(captured)
   }
   @IpcMethod()
-  async open(workspaceId: string, observed?: Parameters<E2eeWorkspaceRuntime['open']>[1]) {
+  async open(
+    workspaceId: string,
+    observed?: Parameters<E2eeWorkspaceRuntime['open']>[1],
+    expectedAccountId?: string
+  ) {
     const id = sender()
+    const identity =
+      expectedAccountId === undefined
+        ? undefined
+        : getIpcServiceDeps().authService.getCachedSessionIdentity()
+    if (expectedAccountId !== undefined && identity?.userId !== expectedAccountId)
+      throw new Error('e2ee_account_mismatch')
     let accountId: string | undefined
     return withDesktopE2eeAccount(
       (owner) =>
-        Effect.gen(function* () {
-          accountId = owner.accountId
-          const status = yield* owner.host.open(workspaceId, observed)
-          const readers = owner.readers.get(workspaceId) ?? new Map<number, number>()
-          readers.set(id, (readers.get(id) ?? 0) + 1)
-          owner.readers.set(workspaceId, readers)
-          return status
-        }),
+        Effect.gen(
+          function* (this: E2eeIpc) {
+            accountId = owner.accountId
+            const status = yield* owner.host.open(workspaceId, observed)
+            const latest =
+              expectedAccountId === undefined
+                ? undefined
+                : getIpcServiceDeps().authService.getCachedSessionIdentity()
+            if (
+              expectedAccountId !== undefined &&
+              (latest?.userId !== expectedAccountId || latest?.generation !== identity?.generation)
+            )
+              return yield* Effect.fail(new Error('e2ee_account_mismatch'))
+            const readers = owner.readers.get(workspaceId) ?? new Map<number, number>()
+            readers.set(id, (readers.get(id) ?? 0) + 1)
+            owner.readers.set(workspaceId, readers)
+            return expectedAccountId === undefined
+              ? status
+              : { ...status, readerOwner: this.readerOwner(owner) }
+          }.bind(this)
+        ),
       workspaceId,
       false
     ).catch(async (error) => {
@@ -1156,11 +1557,21 @@ export class E2eeIpc extends IpcService {
     })
   }
   @IpcMethod()
-  async close(workspaceId: string) {
+  async close(workspaceId: string, expectedAccountId?: string, readerOwner?: string) {
     const id = sender()
+    if (
+      expectedAccountId !== undefined &&
+      getIpcServiceDeps().authService.getCachedSessionIdentity().userId !== expectedAccountId
+    )
+      return
+    const ownsReader = (owner: object) =>
+      readerOwner === undefined || this.readerOwner(owner) === readerOwner
     const cleanup = await withDesktopE2eeAccount(
       (owner) =>
         Effect.gen(function* () {
+          if (expectedAccountId !== undefined && owner.accountId !== expectedAccountId)
+            return Effect.void
+          if (!ownsReader(owner)) return Effect.void
           const readers = owner.readers.get(workspaceId)
           const count = readers?.get(id) ?? 0
           if (count > 1) readers!.set(id, count - 1)
