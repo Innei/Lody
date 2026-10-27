@@ -108,6 +108,7 @@ const setup = (
       signer: machine,
       encryptionPublicKey: machine.enc,
       kind: 'machine',
+      machineId: 'machine',
     });
     const record = yield* signLedgerRecord(
       Result.getOrThrow(prepareLedgerCommand(view, owner.publicKey, admission)),
@@ -365,7 +366,7 @@ describe('machine E2EE local runtime', () => {
           createHash('sha256').update(accountId).digest('hex'),
           'workspace'
         );
-        let records = [...fixture.records];
+        let records = [fixture.genesisRecord];
         let frame: Uint8Array | undefined;
         let report = false;
         const prepare = (session: string) =>
@@ -403,6 +404,15 @@ describe('machine E2EE local runtime', () => {
                   prepareLedgerCommand(view, owner.publicKey, {
                     _tag: 'AdmitDevice',
                     kind: 'machine',
+                    machineId: 'machine',
+                    replaces: (() => {
+                      const previous = [...view.inspectState().devices].find(
+                        ([, device]) => device.kind === 'machine' && device.machineId === 'machine'
+                      )?.[0];
+                      return previous
+                        ? Result.getOrThrow(Bytes.signingPublicKey(Buffer.from(previous, 'hex')))
+                        : null;
+                    })(),
                     signingPublicKey: recipient,
                     encryptionPublicKey: Result.getOrThrow(
                       Bytes.encryptionPublicKey(Buffer.from(material.encryptionPublicKey, 'hex'))
@@ -1714,6 +1724,7 @@ describe('machine E2EE local runtime', () => {
               prepareLedgerCommand(view, owner.publicKey, {
                 _tag: 'AdmitDevice',
                 kind: 'machine',
+                machineId: 'machine',
                 signingPublicKey: Result.getOrThrow(
                   Bytes.signingPublicKey(Buffer.from(material.signingPublicKey, 'hex'))
                 ),
@@ -1878,6 +1889,7 @@ describe('machine E2EE local runtime', () => {
           yield* append({
             _tag: 'AdmitDevice',
             kind: 'machine',
+            machineId: 'machine',
             signingPublicKey: Result.getOrThrow(
               Bytes.signingPublicKey(Buffer.from(original.signingPublicKey, 'hex'))
             ),
