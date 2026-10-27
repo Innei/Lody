@@ -1,5 +1,7 @@
 import { E2eeRemoteMachinePairing } from '@/components/pages/e2ee-remote-machine-pairing';
 import { E2eeIdentityRecovery } from '@/components/pages/e2ee-identity-recovery';
+
+import { E2eeTeamSettingsHost } from '@/components/settings/e2ee-team-settings';
 import { desktopWindowId } from '@/lib/desktop-window';
 import { readEncryptedLocalIdentity, type E2eeLocalDataScope } from '@/lib/e2ee-local-data';
 import {
@@ -450,6 +452,17 @@ function WorkspaceControlRoute() {
           void navigate({ to: '/workspace/create', search: { allowExisting: true } });
         }}
       >
+        {port?.runtime && accountId && current?.history?.locallyPinned && (
+          <>
+            <E2eeTeamSettingsHost
+              key={identity + ':team'}
+              runtime={port.runtime}
+              workspaceId={workspaceId}
+              accountId={accountId}
+              profiles={directory?.scope === scope ? directory.profiles : undefined}
+            />
+          </>
+        )}
         {port?.runtime && accountId && (
           <E2eePersonalPairing
             key={identity}
