@@ -1,3 +1,4 @@
+import { E2eeRemoteMachinePairing } from '@/components/pages/e2ee-remote-machine-pairing';
 import { E2eeIdentityRecovery } from '@/components/pages/e2ee-identity-recovery';
 import { createFileRoute, useNavigate } from '@tanstack/react-router';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
@@ -388,6 +389,13 @@ function WorkspaceControlRoute() {
             runtime={port.runtime}
             canApprove={Boolean(current?.history?.locallyPinned)}
             onJoined={refresh}
+          />
+        )}
+        {port?.runtime && current?.history?.locallyPinned && (
+          <E2eeRemoteMachinePairing
+            key={identity + ':remote-machine'}
+            workspaceId={workspaceId}
+            runtime={port.runtime}
           />
         )}
         {port && current?.history?.locallyPinned && (
