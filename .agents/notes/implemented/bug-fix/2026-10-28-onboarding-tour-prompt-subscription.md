@@ -18,6 +18,7 @@ The [prompt suggestion integration](../feature/2026-10-27-prompt-suggestions.md)
 - Both the first failure and [run 40622740264](https://github.com/LodyAI/Lody/actions/runs/40622740264) retained a screenshot and trace showing the onboarding route's crash page with `TypeError: e.subscribePromptSuggestion is not a function`. The latter's CLI backlog records successful local workspace provisioning and agent-service readiness.
 - Passing and failing jobs used the same runner image `macos-15-arm64`, version `20260907.0337.1`, provisioner `20260828.587`, Node setup `22.23.4`, Electron `44.9.3`, and Playwright `1.58.2`. Their lockfile, journey registry, feature definitions and smoke workflow are identical.
 - Run `40620365356` at 02:20 UTC reported workflow success but skipped the Desktop job. It does not establish a passing application launch.
+- [PR #1998](https://github.com/LodyAI/Lody/pull/1998)'s [failed job](https://github.com/LodyAI/Lody/actions/runs/40626372854/job/122612190080) independently reproduced the same crash at head `91d320cfa`. Its chat-directory cleanup changes did not alter the tour fixture or suggestion hook from base `574cfb00a`.
 
 Main's first bad commit is `574cfb00a` (#1951, 02:33 UTC), after `55c6f1f80`. The 02:24 failure was on #1951's own branch; it does not put the regression into main's 02:05–02:24 commit window. Reverting #1991 cannot remove the missing tour subscription.
 
@@ -40,3 +41,5 @@ The same `@LODY-ONBOARDING-001` journey was run against locally built OSS deskto
 | `574cfb00a` plus the five-line fixture fix | Full smoke: 6 scenarios / 42 steps passed |
 
 Both builds use the frozen lockfile and their exact submodule pins. Every launch uses a synthetic disposable profile. Root formatting and documentation checks pass. Workspace typechecks and static checks pass; components pass 6,392 tests and Electron passes 171. Root `pnpm check` stops at one unchanged CLI native Git fixture with `context_unreadable` (4,988 CLI tests pass, four skip). Removing the session-injected Git environment and helper PATH makes that fixture pass all 24 tests; this does not turn the original full check green.
+
+PR #1998's independent repair also reproduced the failure in its expanded unit test and a freshly built Electron onboarding journey. Before reconciliation with #2001, its four fixture/hook suites passed six tests, full smoke passed six scenarios / 42 steps, and full `pnpm check` passed in a subprocess using system Git without inherited `GIT_*`/`LODY_GIT_*` variables. Reconciliation keeps #2001's typed subscription and isolation assertion; the preview still receives no live suggestions, and neither repair establishes external Agent suggestion delivery.
