@@ -43,6 +43,14 @@ That work adapted [#491](https://github.com/LodyAI/Lody/pull/491) by
   priority from creation time. Search filters without re-ranking the list;
   no-project/add/connect actions keep their fixed positions.
 
+## GitHub owner icon alignment
+
+The shared owner-avatar frame uses block flex layout, avoiding an inline baseline
+line box in the mobile project trigger. Before the correction, Chromium and WebKit
+both measured the loaded avatar center 2.5px above the project label in either
+theme; afterward the centers coincide. The existing browser coverage checks the
+loading fallback, loaded avatar and expanded option against the text center.
+
 ## First-send ownership
 
 The landing keeps its controlled draft and attachments until session admission
@@ -126,6 +134,10 @@ is bound on the page itself and ignores touches that start in the composer
 shell. With `axis` locking, use-gesture reports `first` on the first intentional
 move, so the edge test reads the touch-down `initial` position. Web mounts no
 gesture, matching other edge-back surfaces.
+
+First-send browser geometry checks wait for the entrance animation to finish
+before measuring the composer, then retain exact geometry assertions throughout
+sending. The entrance motion and send handoff are separate interactions.
 
 Evidence is limited to jsdom tests driving touch events through use-gesture
 (entrance, Back exit, follow-and-commit, snap-back, composer/mid-screen/web
