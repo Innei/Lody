@@ -90,8 +90,7 @@
   host is accepted (`normalizeTarget` in `preview-service.ts`). The tunnel makes this machine the
   origin of whatever it connects to, so a LAN target would turn it into a pivot into its own
   network for a remote workspace member or an agent that talked them into a click; the approver
-  cannot see what a LAN address here even is. Clients never send one, but this check must hold for
-  any client.
+  cannot see what a LAN address here even is. This check must hold for any client.
 - Loopback means a literal address or the exact name `localhost`. `classifyBrowserHostname` reads
   the hostname text, so any `*.localhost` name passes it while a search domain or rebinding record
   can point that name at a LAN host.

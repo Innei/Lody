@@ -1,5 +1,5 @@
 import { makeExecutionOriginRecovery } from './execution-origin-recovery';
-import { makeEncryptedFeatureReceiver } from './feature-rpc';
+import { makeEncryptedFeatureReceiver, type EncryptedFeatureHandler } from './feature-rpc';
 import { makeEncryptedRpcReceiver } from './realtime-rpc';
 import { lazyExecutionJournal } from './agent-execution';
 import { makeE2eeRpcNative, E2eeRpcOriginals } from '@lody/loro-streams-rpc/e2ee-native';
@@ -16,7 +16,6 @@ import {
   isSessionDocRoomId,
   type SessionId,
   type LoroStreamsTokenAuth,
-  type WorkspaceId,
 } from '@lody/shared';
 import { leaseE2eeIdentity } from '@lody/shared/node/e2ee-identity';
 import { createHash, randomBytes } from 'node:crypto';
@@ -792,42 +791,44 @@ async function openWorkspaceOwned(
       };
     }),
   };
+  const createTokenProvider = (rpcOnly?: true) =>
+    Effect.gen(function* () {
+      if (closed) throw new Error('e2ee_closed');
+      if (!options.cloud.createContentTokenProvider) throw new Error('e2ee_content_unavailable');
+      const provider = yield* options.cloud.createContentTokenProvider({
+        workspaceId: options.workspaceId,
+        credential: opened.credential,
+        ...(rpcOnly ? { rpcOnly } : {}),
+      });
+      bucket = provider.getBucketId;
+      const observe =
+        (auth: LoroStreamsTokenAuth): LoroStreamsTokenAuth =>
+        (context) =>
+          auth(context).pipe(
+            Effect.tapCause((cause) =>
+              Effect.sync(() => {
+                for (const reason of cause.reasons) {
+                  if (reason._tag === 'Fail') credentialFailureHandler(reason.error);
+                  if (reason._tag === 'Die') credentialFailureHandler(reason.defect);
+                }
+              })
+            )
+          );
+      const observed = {
+        ...provider,
+        getToken: observe(provider.getToken),
+        createAuthCallback: () => observe(provider.createAuthCallback()),
+      };
+      tokensInUse.add(observed);
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          tokensInUse.delete(observed);
+        })
+      );
+      return observed;
+    });
   const tokens: CloudStreamsTokenPort = {
-    createTokenProvider: () =>
-      Effect.gen(function* () {
-        if (closed) throw new Error('e2ee_closed');
-        if (!options.cloud.createContentTokenProvider) throw new Error('e2ee_content_unavailable');
-        const provider = yield* options.cloud.createContentTokenProvider({
-          workspaceId: options.workspaceId,
-          credential: opened.credential,
-        });
-        bucket = provider.getBucketId;
-        const observe =
-          (auth: LoroStreamsTokenAuth): LoroStreamsTokenAuth =>
-          (context) =>
-            auth(context).pipe(
-              Effect.tapCause((cause) =>
-                Effect.sync(() => {
-                  for (const reason of cause.reasons) {
-                    if (reason._tag === 'Fail') credentialFailureHandler(reason.error);
-                    if (reason._tag === 'Die') credentialFailureHandler(reason.defect);
-                  }
-                })
-              )
-            );
-        const observed = {
-          ...provider,
-          getToken: observe(provider.getToken),
-          createAuthCallback: () => observe(provider.createAuthCallback()),
-        };
-        tokensInUse.add(observed);
-        yield* Effect.addFinalizer(() =>
-          Effect.sync(() => {
-            tokensInUse.delete(observed);
-          })
-        );
-        return observed;
-      }),
+    createTokenProvider: () => createTokenProvider(),
     // E2EE never attaches the old Machine RPC or presence token consumers.
     createTokenProviderLegacy: () => {
       throw new Error('e2ee_plaintext_channel_disabled');
@@ -1156,9 +1157,7 @@ async function openWorkspaceOwned(
       machineId: string,
       offer: (input: E2eeDispatchInput) => Promise<E2eeDispatchAck>,
       trace?: (event: E2eeRpcTiming) => void,
-      handleFeature?: (
-        request: import('@lody/shared/local-machine-rpc').LocalMachineRpcRequest
-      ) => Promise<import('@lody/shared/local-machine-rpc').LocalMachineRpcResponse>
+      handleFeature?: EncryptedFeatureHandler
     ) =>
       run(
         Effect.gen(function* () {
@@ -1166,11 +1165,9 @@ async function openWorkspaceOwned(
           rpcFiber = yield* Effect.forkIn(
             Effect.scoped(
               Effect.gen(function* () {
-                const provider = yield* tokens.createTokenProvider({
-                  workspaceId: options.workspaceId as WorkspaceId,
-                });
+                const provider = yield* createTokenProvider(true);
                 yield* provider.getToken();
-                const bucketId = bucket?.();
+                const bucketId = provider.getBucketId();
                 if (!bucketId || bucketId === 'lody' || !provider.getGatewayBaseUrl())
                   return yield* Effect.fail(new Error('e2ee_content_configuration'));
                 const controller = new AbortController();
@@ -1200,13 +1197,14 @@ async function openWorkspaceOwned(
                   trace,
                 });
                 const receiveFeature = handleFeature
-                  ? makeEncryptedFeatureReceiver({
+                  ? yield* makeEncryptedFeatureReceiver({
                       workspaceId: options.workspaceId,
                       genesis: binding.genesisHash,
                       machineId,
                       native: rpc,
                       journal: rpcJournal,
                       authorize: opened.executionAuthorization.authorizeExecution,
+                      authorizeRead: opened.executionAuthorization.authorizeRead,
                       isOpen: () => !closed,
                       handle: handleFeature,
                       client,

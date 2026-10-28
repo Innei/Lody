@@ -1213,6 +1213,14 @@ export class LoroDocumentManager {
     }
   }
 
+  /** Observation of the machine catalog already owned by the runtime. */
+  peekLocalProjectRootPath(
+    machineId: MachineId,
+    localProjectId: import('@lody/shared').LocalProjectId
+  ): string | null {
+    return this.machineFlockSync.peekLocalProjectRootPath(machineId, localProjectId);
+  }
+
   async syncMachineFlockDoc(
     machineId: MachineId,
     options: { timeoutMs?: number; reason?: string; scheduleRetry?: boolean } = {}
