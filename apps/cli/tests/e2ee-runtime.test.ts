@@ -4501,8 +4501,9 @@ const executionFixture = Effect.fnUntraced(function* (directory: string, count =
     monotonicTimeNanos: Effect.sync(() => BigInt(io.monotonic) * 1_000_000n),
     sleep: (duration) => baseClock.sleep(duration),
   };
-  const makeGate = () =>
+  const makeGate = (sharing?: Parameters<typeof makeCliE2eeExecutionAuthorization>[0]['sharing']) =>
     makeCliE2eeExecutionAuthorization({
+      sharing,
       workspaceId: 'workspace',
       credential: fixture.credential,
       runtime,
@@ -4555,6 +4556,9 @@ describe('machine execution authorization freshness', () => {
     'foreign-source',
     'pending-source',
     'tampered-before-claim',
+    'project-shared',
+    'project-unshared',
+    'source-withdrawn',
   ] as const)(
     'authorizes the machine-signed scheduled turn after production preparation and handoff, with one shared claim (%s)',
     (mode) =>
@@ -4568,11 +4572,15 @@ describe('machine execution authorization freshness', () => {
             fixture,
             runtime,
             gate: authorization,
+            makeGate,
             device,
           } = yield* executionFixture(directory);
           let sourceSigner: Parameters<typeof makeStreamsUpdateBinding>[0]['signer'] =
             fixture.owner;
-          if (mode === 'foreign-source') {
+          const sharedSource = ['project-shared', 'project-unshared', 'source-withdrawn'].includes(
+            mode
+          );
+          if (mode === 'foreign-source' || sharedSource) {
             const custody = yield* makeNodeE2eeCustody({
               directory: join(directory, 'foreign-source'),
               wrapper,
@@ -4626,6 +4634,14 @@ describe('machine execution authorization freshness', () => {
                 title: 'Scheduled',
                 prompt: 'Scheduled hello',
                 machineId: 'machine',
+                ...(mode === 'project-unshared'
+                  ? {
+                      project: {
+                        kind: 'local' as const,
+                        localProjectId: 'private-project' as import('@lody/shared').LocalProjectId,
+                      },
+                    }
+                  : {}),
                 trigger: { kind: 'once', at: '1970-01-01T00:01:00.000Z' },
                 misfirePolicy: { kind: 'run_once' },
                 overlapPolicy: 'queue_one',
@@ -4653,17 +4669,52 @@ describe('machine execution authorization freshness', () => {
             scheduleDoc,
             scheduleBinding
           );
-          const authorizeSchedule = (request: ScheduleAuthorizationRequest) =>
+          let sharingCurrent = true;
+          const sourceGate = sharedSource
+            ? yield* makeGate((_requester, localProjectId) =>
+                Effect.succeed({
+                  allowed: localProjectId === undefined || localProjectId === 'shared-project',
+                  isCurrent: () => sharingCurrent,
+                })
+              )
+            : authorization;
+          const scheduleOptions = {
+            workspaceId: 'workspace',
+            doc: scheduleDoc,
+            origins,
+            open: scheduleBinding.openAuthenticated,
+            authorizeExecution: sourceGate.authorizeExecution,
+            isExecutionOpen: () => true,
+          };
+          if (mode === 'project-unshared') {
+            expect(
+              (yield* Effect.scoped(
+                authorizeEncryptedSchedule({
+                  ...scheduleOptions,
+                  request: {
+                    scheduleId: 'reserved-message',
+                    definitionFingerprint: scheduleDefinitionFingerprint(document),
+                  },
+                })
+              ))._tag
+            ).toBe('Denied');
+          }
+          const authorizeSchedule = (
+            request: ScheduleAuthorizationRequest,
+            localProjectId?: string
+          ) =>
             Effect.scoped(
               authorizeEncryptedSchedule({
-                workspaceId: 'workspace',
+                ...scheduleOptions,
                 request,
-                doc: scheduleDoc,
-                origins,
-                open: scheduleBinding.openAuthenticated,
-                authorizeExecution: authorization.authorizeExecution,
-                isExecutionOpen: () => true,
+                executionTarget: { localProjectId },
               })
+            ).pipe(
+              Effect.tap(() =>
+                Effect.sync(() => {
+                  if (mode === 'source-withdrawn') sharingCurrent = false;
+                })
+              )
             );
           const sessionId = 'scheduled-chat' as SessionId;
           const handle = yield* Effect.promise(() =>
@@ -4742,6 +4793,12 @@ describe('machine execution authorization freshness', () => {
           );
           const intent = {
             workspaceId: 'workspace',
+            ...(sharedSource
+              ? {
+                  localProjectId:
+                    mode === 'project-unshared' ? 'private-project' : 'shared-project',
+                }
+              : {}),
             sessionId,
             userTurnId: prepared.userTurn.id,
             requesterUserId: 'display-owner',
@@ -4810,8 +4867,10 @@ describe('machine execution authorization freshness', () => {
             expect((yield* execution.claim(intent)).state).toBe('expired');
             return;
           }
-          if (mode !== 'valid') {
+          if (mode !== 'valid' && mode !== 'project-shared') {
             expect(claim.state).toBe('denied');
+            if (mode === 'project-unshared')
+              expect(claim).toMatchObject({ reason: 'e2ee_machine_not_shared' });
             return;
           }
           expect(claim.state).toBe('claimed');
@@ -4874,7 +4933,7 @@ describe('machine execution authorization freshness', () => {
           yield* runtime.ingest(page(fixture.records, start));
           expect(
             yield* authorization.authorizeExecution('workspace', hex(attacker.publicKey.toBytes()))
-          ).toEqual({ _tag: 'Denied', reason: 'e2ee_machine_not_owned' });
+          ).toEqual({ _tag: 'Denied', reason: 'e2ee_machine_not_shared' });
           const attackerRepo = yield* Effect.acquireRelease(
             Effect.promise(() => LoroRepo.create({})),
             (r) => Effect.promise(() => r.destroy())
@@ -5040,6 +5099,7 @@ describe('machine execution authorization freshness', () => {
     'snapshot-only',
     'manual-forgery',
     'manual-valid',
+    'manual-valid-other-device',
     'revoked-author',
     'concurrent-edit',
     'concurrent-timeline',
@@ -5149,7 +5209,9 @@ describe('machine execution authorization freshness', () => {
                 )
               ),
           });
-        expect(yield* authorize()).toEqual({ _tag: 'Authorized' });
+        const sourceGrant = yield* authorize();
+        expect(sourceGrant).toMatchObject({ _tag: 'Authorized' });
+        if (sourceGrant._tag === 'Authorized') expect(sourceGrant.isCurrent?.()).toBe(true);
         const from = doc.version();
         if (mutation === 'snapshot-only') {
           const snapshot = new LoroDoc();
@@ -5172,9 +5234,13 @@ describe('machine execution authorization freshness', () => {
           }
           return;
         }
-        if (mutation === 'manual-forgery' || mutation === 'manual-valid') {
+        if (
+          mutation === 'manual-forgery' ||
+          mutation === 'manual-valid' ||
+          mutation === 'manual-valid-other-device'
+        ) {
           request = { ...request, manualRunKey: manualScheduleRunKey('proof', 'manual') };
-          if (mutation === 'manual-valid') {
+          if (mutation !== 'manual-forgery') {
             yield* Effect.promise(() =>
               repository.requestRun({
                 scheduleId: 'proof',
@@ -5183,10 +5249,23 @@ describe('machine execution authorization freshness', () => {
                 now: 0,
               })
             );
-            yield* retainSignedScheduleUpdate(origins, docId, doc, binding, from);
+            const manualBinding =
+              mutation === 'manual-valid-other-device'
+                ? yield* makeStreamsUpdateBinding({
+                    genesis: fixture.genesis,
+                    resource: `doc:${docId}`,
+                    model: 'loro',
+                    writeEpoch: 'current',
+                    signer: fixture.owner,
+                    ledger: () => Effect.succeed(fixture.current),
+                    readEpochKey: () =>
+                      Effect.fromResult(Bytes.epochKey(new Uint8Array(32).fill(20))),
+                  })
+                : binding;
+            yield* retainSignedScheduleUpdate(origins, docId, doc, manualBinding, from);
           }
           expect((yield* authorize())._tag).toBe(
-            mutation === 'manual-valid' ? 'Authorized' : 'Denied'
+            mutation !== 'manual-forgery' ? 'Authorized' : 'Denied'
           );
           return;
         }
@@ -5242,7 +5321,7 @@ describe('machine execution authorization freshness', () => {
         recordScheduleAuthorization(doc, changed);
         yield* retainSignedScheduleUpdate(origins, docId, doc, binding, from);
         expect((yield* authorize())._tag).toBe('Authorized');
-        expect(yield* gate.authorizeExecution(ws, hex(device.publicKey.toBytes()))).toEqual({
+        expect(yield* gate.authorizeExecution(ws, hex(device.publicKey.toBytes()))).toMatchObject({
           _tag: 'Authorized',
         });
       })
@@ -5274,12 +5353,12 @@ describe('machine execution authorization freshness', () => {
             io.monotonic += 60_000;
             return page(fixture.records);
           };
-          expect(yield* gate.authorizeExecution('workspace', sender)).toEqual({
+          expect(yield* gate.authorizeExecution('workspace', sender)).toMatchObject({
             _tag: 'Authorized',
           });
           io.wall = io.monotonic = 899_999;
           io.offline = true;
-          expect(yield* gate.authorizeExecution('workspace', sender)).toEqual({
+          expect(yield* gate.authorizeExecution('workspace', sender)).toMatchObject({
             _tag: 'Authorized',
           });
           // Another device cannot borrow this device's cached authorization.
@@ -5292,7 +5371,7 @@ describe('machine execution authorization freshness', () => {
             reason: 'unavailable',
           });
           io.offline = false;
-          expect(yield* gate.authorizeExecution('workspace', sender)).toEqual({
+          expect(yield* gate.authorizeExecution('workspace', sender)).toMatchObject({
             _tag: 'Authorized',
           });
           expect(yield* gate.authorizeExecution('other-workspace', sender)).toMatchObject({
@@ -5370,8 +5449,8 @@ describe('machine execution authorization freshness', () => {
           );
           yield* Fiber.interrupt(first);
           released.resolve(page(fixture.records));
-          expect(yield* Fiber.join(sibling)).toEqual({ _tag: 'Authorized' });
-          expect(yield* Fiber.join(machineSibling)).toEqual({ _tag: 'Authorized' });
+          expect(yield* Fiber.join(sibling)).toMatchObject({ _tag: 'Authorized' });
+          expect(yield* Fiber.join(machineSibling)).toMatchObject({ _tag: 'Authorized' });
           expect(io.reads).toBe(1);
           io.wall = io.monotonic = 900_000;
           const failing = Promise.withResolvers<ReturnType<typeof page>>();
@@ -5397,7 +5476,7 @@ describe('machine execution authorization freshness', () => {
           ]);
           expect(io.reads).toBe(2);
           io.respond = async () => page(fixture.records);
-          expect(yield* gate.authorizeExecution('workspace', fixture.sender)).toEqual({
+          expect(yield* gate.authorizeExecution('workspace', fixture.sender)).toMatchObject({
             _tag: 'Authorized',
           });
         })
@@ -5413,7 +5492,7 @@ describe('machine execution authorization freshness', () => {
       await execute(
         Effect.gen(function* () {
           const { fixture, gate, io, device } = yield* executionFixture(directory);
-          expect(yield* gate.authorizeExecution('workspace', fixture.sender)).toEqual({
+          expect(yield* gate.authorizeExecution('workspace', fixture.sender)).toMatchObject({
             _tag: 'Authorized',
           });
           const entered = Promise.withResolvers<void>();
@@ -5549,7 +5628,7 @@ describe('machine execution authorization freshness', () => {
               yield* append({ _tag: 'SetRole', membershipId: device.membershipId, role });
             expect(yield* gate.authorizeExecution('workspace', key)).toMatchObject({
               _tag: 'Denied',
-              reason: role === 'guest' ? 'not-authorized' : 'e2ee_machine_not_owned',
+              reason: role === 'guest' ? 'not-authorized' : 'e2ee_machine_not_shared',
             });
           }
           const extraCustody = yield* makeNodeE2eeCustody({
@@ -5567,7 +5646,7 @@ describe('machine execution authorization freshness', () => {
             })
           );
           const extraKey = hex(extra.publicKey.toBytes());
-          expect(yield* gate.authorizeExecution('workspace', extraKey)).toEqual({
+          expect(yield* gate.authorizeExecution('workspace', extraKey)).toMatchObject({
             _tag: 'Authorized',
           });
           // Historical author records remain, but known revocation rejects the cached grant immediately.
@@ -5598,7 +5677,7 @@ describe('machine execution authorization freshness', () => {
             _tag: 'Denied',
             reason: 'not-authorized',
           });
-          expect(yield* gate.authorizeExecution('workspace', fixture.sender)).toEqual({
+          expect(yield* gate.authorizeExecution('workspace', fixture.sender)).toMatchObject({
             _tag: 'Authorized',
           });
           yield* append({ _tag: 'DeclareCapabilities', capabilities: [1] });
@@ -5606,7 +5685,7 @@ describe('machine execution authorization freshness', () => {
           expect(yield* gate.authorizeExecution('workspace', key)).toMatchObject({
             _tag: 'Denied',
           });
-          expect(yield* gate.authorizeExecution('workspace', fixture.sender)).toEqual({
+          expect(yield* gate.authorizeExecution('workspace', fixture.sender)).toMatchObject({
             _tag: 'Authorized',
           });
           yield* append({
@@ -5648,14 +5727,18 @@ describe('machine execution authorization freshness', () => {
           expect(
             yield* first.gate.authorizeExecution('workspace', first.fixture.sender)
           ).toMatchObject({ _tag: 'Denied' });
-          expect(yield* other.gate.authorizeExecution('workspace', other.fixture.sender)).toEqual({
+          expect(
+            yield* other.gate.authorizeExecution('workspace', other.fixture.sender)
+          ).toMatchObject({
             _tag: 'Authorized',
           });
           // Neither local reads nor a previously created content binding depend on this gate.
           expect(yield* first.runtime.status()).toMatchObject({ length: 2 });
           yield* first.runtime.binding('local-document', 'loro', 0);
           first.io.respond = async () => page(first.fixture.records);
-          expect(yield* first.gate.authorizeExecution('workspace', first.fixture.sender)).toEqual({
+          expect(
+            yield* first.gate.authorizeExecution('workspace', first.fixture.sender)
+          ).toMatchObject({
             _tag: 'Authorized',
           });
           // Wall-clock rollback cannot lengthen the monotonic lease.
@@ -5696,7 +5779,7 @@ describe('machine execution authorization freshness', () => {
           // A stopped producer has no continuation that could ingest a late response.
           late.resolve({ ...page(fixture.records), recordsHex: ['00'] });
           io.respond = async () => page(fixture.records);
-          expect(yield* gate.authorizeExecution('workspace', fixture.sender)).toEqual({
+          expect(yield* gate.authorizeExecution('workspace', fixture.sender)).toMatchObject({
             _tag: 'Authorized',
           });
           expect(yield* runtime.status()).toMatchObject({ length: 2 });
@@ -5724,7 +5807,7 @@ describe('machine execution authorization freshness', () => {
           });
           io.respond = async (input) =>
             input.cursor ? page(fixture.records, 64) : page(fixture.records, 0, 64);
-          expect(yield* gate.authorizeExecution('workspace', fixture.sender)).toEqual({
+          expect(yield* gate.authorizeExecution('workspace', fixture.sender)).toMatchObject({
             _tag: 'Authorized',
           });
         })

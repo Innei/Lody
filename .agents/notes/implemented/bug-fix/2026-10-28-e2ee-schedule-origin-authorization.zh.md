@@ -2,7 +2,7 @@
 
 Status: implemented
 Translation: current
-PR: https://github.com/LodyAI/Lody/pull/2012
+PR: https://github.com/LodyAI/Lody/pull/2012, https://github.com/LodyAI/Lody/pull/2018
 
 [English](2026-10-28-e2ee-schedule-origin-authorization.md)
 
@@ -15,6 +15,8 @@ PR: https://github.com/LodyAI/Lody/pull/2012
 只有加密写入会向 Loro 列表 `scheduleAuthorizations` 追加 map。定义声明包含 `kind: definition` 和 `definitionFingerprint`；手动运行声明使用 `kind: manual`，并包含稳定的 `manualRunKey`。记录中的身份字段不能授予权限。列表插入的操作 ID 用于定位原始签名更新，重新验签，再从其原始字节与依赖重建文档。重建的声明和执行 fingerprint 必须匹配当前文档。声明后对 definition、prompt 或 message 子树的任何操作都会使其失效，包括删除和同值改写。用户明确保存时会创建新声明；单纯追加 timeline 活动不会使其失效。
 
 宿主通过会话原件已有的回执存储和有界恢复机制，保留加密定时任务更新的原件。每次调用都根据当前已验证 signer 执行现有的认证机器访问策略，并检查等待授权期间文档是否变化。手动运行同时要求定义和请求的 signer 获得授权。注册表行仍只负责发现和发布门控，不授予权限。
+
+A3 装配中，定义与手动请求的签发者都经过普通执行使用的机器／项目共享门。交付前检查已签名定义的本地项目；实际开始使用宿主解析的 Session 目标，包括明确的纯聊天无项目状态。所有来源授权检查与生成 turn 的检查取交集，保留到同步 journal claim 前。后一个签发者的认证刷新即使没有权限变化，也可能使较早的账本快照失效；因此来源检查最多通过已填充的 requester 缓存再检查一次，随后复查 turn 签发者。不稳定或已撤回的结果仍拒绝 claim，合法多设备 schedule 则保持可用。
 
 机器生成的加密 turn 在 `scheduleRun` 中冻结 fingerprint 和可选的手动运行 key，其原始更新验签也覆盖这些字段。实际启动 journal claim 会再次独立验证定时任务授权，因此缓存的准备结果、已提交的派发指针和机器自己的签名都不能替代输入来源授权。缺少声明或原件时拒绝执行并保留重试；旧原件已被裁剪时，仅从快照启动的副本可能需要 owner 重新保存。快照作者不能授权历史定时任务输入。
 

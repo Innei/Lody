@@ -2,7 +2,7 @@
 
 Status: proposed
 Translation: current
-PR: [#2014](https://github.com/LodyAI/Lody/pull/2014)
+PR: [#2014](https://github.com/LodyAI/Lody/pull/2014), [#2018](https://github.com/LodyAI/Lody/pull/2018)
 
 [中文](2026-10-28-e2ee-machine-sharing.zh.md)
 
@@ -51,3 +51,17 @@ Observed withdrawal invalidates permission immediately. A strictly less than 15-
 ## Verification
 
 [Behavioral coverage](../../../../packages/e2ee-core/test/machine-sharing.test.ts) uses deterministic synthetic identities/nonces and explicit signing barriers. It covers same-member removal/readmission, old prepared writes and cached execution evidence, fresh revision-one bootstrap without old policy bytes, private defaults, explicit re-sharing, atomic replacement continuity, ledger-position/proof substitution, compact-view qualification, owner-personal historical body recovery and full-project preservation on re-sign. Existing ledger/crypto vectors remain unchanged. No deployed CAS, real-machine freshness or two-member product acceptance is claimed.
+
+## Native host ownership
+
+Policy originals, request reconciliation, rollback pins and RAM caches include the ledger-qualified generation. Hosts select admission/replacement originals from local history and use core to authenticate each exact position; compact views may qualify through full local replay at the same authenticated endpoint. Missing evidence denies sharing only and leaves same-member execution independent. Desktop reads return generation and updates require it, so old-window intents cannot silently enable a readmitted machine. Removal is terminal in that generation; fresh explicit intent starts revision one in the new resource.
+
+Policy storage opens only for policy-dependent work; corruption cannot block content reading or the same-member path. SQLite retains ciphertext, complete CAS identities, terminal request dispositions and resource-bound accepted heads. It retains the narrow local switch intent for retry comparison, but no credentials, keys or freshness. Concurrent completions compare durable high water atomically before publishing a cache entry; no account lock or database transaction spans network or cryptographic work.
+
+The workspace Scope owns admitted operations, including writes whose callers stop waiting, and joins them before closing storage. Stop fences publication and preserves pending originals. Latest-read failure clears only dependent policy grants; failed storage opens remain retryable. Wall and monotonic clocks charge all latest-read I/O to the strictly shorter than 15-minute budget. The existing actual-start journal checks a synchronous policy/ledger-generation fence without an intervening await. Withdrawal leaves already-started tasks running.
+
+Explicit re-signing uses authenticated historical complete state after issuer revocation, preserving projects with another current personal device. Historical state never supplies execution evidence or advances an accepted pin alone. A read traverses at most 4096 consecutive versions within its freshness interval; purged gaps without retained originals remain unavailable. Signatures cannot reveal withdrawals never delivered by the service.
+
+Desktop personal signing stays behind `readMachineSharing` / `updateMachineSharing` host and IPC methods, forwarded by the real preload policy and CloudPlatformProvider. CLI machine custody consumes policies and exposes the same workflow but cannot sign owner changes; writing with that identity returns an ownership refusal. Delegated dispatch retains the two-actor permission intersection; display account IDs never become signed delegation evidence.
+
+Native synthetic crypto/SQLite tests cover exact unknown-result recovery, terminal CAS conflict, current issuer revocation and explicit re-signing, project switches, rollback/removal barriers and clock limits. Production CLI construction and desktop/preload/provider regressions exercise actual adapters. This does not establish backend deployment, real keystore assurance or two-member/two-machine product acceptance.

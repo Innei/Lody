@@ -154,7 +154,7 @@ export class Lody {
         journal: lazyExecutionJournal(join(e2ee.repositoryDirectory, 'execution.sqlite'), Date.now),
         authorizeExecution: options.authorizeEncryptedExecution ?? e2ee.authorizeExecution,
         isExecutionOpen: e2ee.isExecutionOpen,
-        authorizeSchedule: (request) =>
+        authorizeSchedule: (request, localProjectId) =>
           Effect.gen(function* () {
             const owner = manager;
             if (!owner || !e2ee) return { _tag: 'Denied' as const, reason: 'unavailable' };
@@ -174,7 +174,7 @@ export class Lody {
             );
             if (synced._tag === 'Failure')
               return { _tag: 'Denied' as const, reason: 'e2ee_schedule_evidence_pending' };
-            return yield* e2ee.authorizeScheduleExecution(request, handle.doc);
+            return yield* e2ee.authorizeScheduleExecution(request, handle.doc, { localProjectId });
           }),
         onClaim: (userTurnId) =>
           options.logger.debug('[e2ee-rpc-timing]', {
