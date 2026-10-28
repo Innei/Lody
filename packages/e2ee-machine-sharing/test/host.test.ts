@@ -302,9 +302,23 @@ describe('native machine-sharing control and execution', () => {
 it('retains private defaults for a missing policy and refuses a machine writer', () =>
   test((f) =>
     Effect.gen(function* () {
-      expect((yield* f.run(f.machine.read('fixture-machine', f.remote))).sharedWithTeam).toBe(
-        false
-      );
+      expect(yield* f.run(f.owner.read('fixture-machine', f.remote))).toMatchObject({
+        canManage: true,
+        sharedWithTeam: false,
+        head: null,
+        signer: null,
+        needsResign: false,
+      });
+      expect(yield* f.run(f.machine.read('fixture-machine', f.remote))).toMatchObject({
+        canManage: false,
+        sharedWithTeam: false,
+      });
+      const viewer = yield* f.make('viewer', f.bob.signer);
+      expect(yield* f.run(viewer.read('fixture-machine', f.remote))).toMatchObject({
+        canManage: false,
+        sharedWithTeam: false,
+        deniedReason: 'e2ee_machine_not_shared',
+      });
       expect(
         yield* f.run(
           f.machine.authorize('fixture-machine', hex(f.bob.publicKey), undefined, f.remote)
@@ -323,6 +337,64 @@ it('retains private defaults for a missing policy and refuses a machine writer',
         )
       ).toBe(true);
       expect(f.io.commits).toBe(0);
+    })
+  ));
+
+it('applies a narrow owner intent to fresh state without overwriting another window project changes', () =>
+  test((f) =>
+    Effect.gen(function* () {
+      const generation = hex(f.f.phone.publicKey);
+      yield* f.run(f.owner.write('fixture-machine', generation, rid(1), change, f.remote));
+      const another = yield* f.make('another-owner-window');
+      yield* f.run(
+        another.write(
+          'fixture-machine',
+          generation,
+          rid(2),
+          {
+            kind: 'project',
+            localProjectId: 'project-b',
+            sharedWithTeam: true,
+          },
+          f.remote
+        )
+      );
+      // The first window still shows revision one; only its requested project changes.
+      yield* f.run(
+        f.owner.write(
+          'fixture-machine',
+          generation,
+          rid(3),
+          {
+            kind: 'project',
+            localProjectId: 'project-a',
+            sharedWithTeam: false,
+          },
+          f.remote
+        )
+      );
+      expect(yield* f.run(f.owner.read('fixture-machine', f.remote))).toMatchObject({
+        head: { revision: 3 },
+        sharedWithTeam: true,
+        projects: ['project-b'],
+      });
+      yield* f.run(
+        f.owner.write(
+          'fixture-machine',
+          generation,
+          rid(4),
+          {
+            kind: 'machine',
+            sharedWithTeam: false,
+          },
+          f.remote
+        )
+      );
+      expect(yield* f.run(another.read('fixture-machine', f.remote))).toMatchObject({
+        head: { revision: 4 },
+        sharedWithTeam: false,
+        projects: ['project-b'],
+      });
     })
   ));
 
@@ -411,7 +483,40 @@ it('rejects stale policy signatures immediately after a known issuer revocation'
           f.machine.authorize('fixture-machine', hex(f.bob.publicKey), 'project-a', f.remote)
         )
       ).toMatchObject({ allowed: false, reason: 'policy-signer-ineligible' });
+      // A stale owner UI cannot use its old personal signer after ledger revocation.
+      expect(
+        Result.isFailure(
+          yield* Effect.result(
+            f.run(
+              f.owner.write(
+                'fixture-machine',
+                hex(f.f.phone.publicKey),
+                rid(99),
+                { kind: 'machine', sharedWithTeam: true },
+                f.remote
+              )
+            )
+          )
+        )
+      ).toBe(true);
+      expect(f.head()?.revision).toBe(1);
       const secondHost = yield* f.make('second-personal', second.signer);
+      expect(yield* f.run(secondHost.read('fixture-machine', f.remote))).toMatchObject({
+        canManage: true,
+        signer: hex(f.f.owner.publicKey),
+        needsResign: true,
+        sharedWithTeam: true,
+        projects: ['project-a'],
+        head: { revision: 1 },
+      });
+      expect(yield* f.run(f.machine.read('fixture-machine', f.remote))).toMatchObject({
+        canManage: false,
+        needsResign: true,
+      });
+      const denied = yield* Effect.result(
+        f.run(f.machine.authorize('fixture-machine', hex(f.bob.publicKey), 'project-a', f.remote))
+      );
+      expect(Result.isFailure(denied) || !denied.success.allowed).toBe(true);
       expect(
         yield* f.run(
           secondHost.write(
@@ -423,6 +528,11 @@ it('rejects stale policy signatures immediately after a known issuer revocation'
           )
         )
       ).toMatchObject({ status: 'saved' });
+      expect(yield* f.run(secondHost.read('fixture-machine', f.remote))).toMatchObject({
+        signer: hex(second.publicKey),
+        needsResign: false,
+        head: { revision: 2 },
+      });
       f.machine.invalidate();
       expect((yield* f.run(f.machine.read('fixture-machine', f.remote))).projects).toEqual([
         'project-a',
